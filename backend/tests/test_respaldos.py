@@ -24,6 +24,8 @@ from apps.comun.servicios_respaldo import (
 )
 from apps.cuentas.models import Usuario
 from tests.conftest import ClienteApi, crear_usuario
+from tests.fabricas_dump import volcado_mysql, volcado_postgres
+from tests.test_importacion import DUMP_SINTETICO
 
 pytestmark = pytest.mark.django_db
 
@@ -578,10 +580,97 @@ def test_comando_management_restaurar_base_datos(mock_buscar_psql: MagicMock, mo
     mock_run.return_value = mock_proc
 
     archivo_sql = tmp_path / "respaldo.sql"
-    archivo_sql.write_text("CREATE TABLE test();", encoding="utf-8")
+    archivo_sql.write_text(volcado_postgres(), encoding="utf-8")
 
-    call_command("restaurar_base_datos", origen=str(archivo_sql))
+    with patch(RESTAURAR + ".call_command"):
+        call_command("restaurar_base_datos", origen=str(archivo_sql))
     assert mock_run.called
     args = mock_run.call_args[0][0]
     assert "-f" in args
     assert str(archivo_sql) in args
+
+
+RESTAURAR = "apps.comun.management.commands.restaurar_base_datos"
+
+
+def _estado() -> dict:
+    return json.loads(ARCHIVO_ESTADO_RESPALDO.read_text(encoding="utf-8"))
+
+
+def test_restaurar_rechaza_sql_desconocido(tmp_path: Path):
+    archivo = tmp_path / "malo.sql"
+    archivo.write_text("DROP TABLE cuentas_usuario;", encoding="utf-8")
+    with patch(RESTAURAR + ".subprocess.run") as mock_run, pytest.raises(CommandError):
+        call_command("restaurar_base_datos", origen=str(archivo))
+    assert not mock_run.called
+    estado = _estado()
+    assert estado["ejecutando"] is False
+    assert "Formato no reconocido" in estado["error"]
+
+
+@patch(RESTAURAR + ".subprocess.run")
+@patch(RESTAURAR + ".buscar_psql", return_value="psql.exe")
+def test_restaurar_psql_usa_transaccion_unica(_psql: MagicMock, mock_run: MagicMock, tmp_path: Path):
+    mock_run.return_value = MagicMock(returncode=0)
+    archivo = tmp_path / "check.sql"
+    archivo.write_text(volcado_postgres(), encoding="utf-8")
+    with patch(RESTAURAR + ".call_command"):
+        call_command("restaurar_base_datos", origen=str(archivo))
+    args = mock_run.call_args[0][0]
+    assert "--single-transaction" in args
+    assert "ON_ERROR_STOP=1" in args
+
+
+def test_falla_respaldo_previo_no_importa(tmp_path: Path):
+    archivo = tmp_path / "legado.sql"
+    archivo.write_text(volcado_mysql(DUMP_SINTETICO), encoding="utf-8")
+    with (
+        patch(RESTAURAR + ".call_command", side_effect=CommandError("sin pg_dump")),
+        patch(RESTAURAR + ".importar_dump") as mock_importar,
+        pytest.raises(CommandError, match="respaldo previo"),
+    ):
+        call_command("restaurar_base_datos", origen=str(archivo))
+    assert not mock_importar.called
+    estado = _estado()
+    assert estado["ejecutando"] is False and estado["exitoso"] is False
+    assert "respaldo previo" in estado["error"]
+
+
+def test_error_en_importacion_cierra_estado(tmp_path: Path):
+    archivo = tmp_path / "legado.sql"
+    archivo.write_text(volcado_mysql(DUMP_SINTETICO), encoding="utf-8")
+    with (
+        patch(RESTAURAR + ".call_command"),
+        patch(RESTAURAR + ".importar_dump", side_effect=RuntimeError("x")),
+        pytest.raises(RuntimeError),
+    ):
+        call_command("restaurar_base_datos", origen=str(archivo))
+    estado = _estado()
+    assert estado["ejecutando"] is False
+    assert estado["exitoso"] is False
+    assert estado["error"] == "x"
+
+
+@pytest.mark.django_db
+def test_restaurar_legado_reporta_progreso(tmp_path: Path):
+    archivo = tmp_path / "legado.sql"
+    archivo.write_bytes(volcado_mysql(DUMP_SINTETICO).encode("latin-1"))
+    escritos: list[dict] = []
+    real = __import__("apps.comun.servicios_respaldo", fromlist=["x"]).escribir_estado_ejecucion
+
+    def espia(datos: dict) -> None:
+        escritos.append(dict(datos))
+        real(datos)
+
+    with (
+        patch(RESTAURAR + ".call_command"),
+        patch(RESTAURAR + ".escribir_estado_ejecucion", side_effect=espia),
+        patch(RESTAURAR + ".escribir_informe", return_value=tmp_path / "informe.md"),
+    ):
+        call_command("restaurar_base_datos", origen=str(archivo), sin_usuarios=True)
+    final = _estado()
+    assert final["etapa"] == "finalizado"
+    assert final["exitoso"] is True
+    assert final["ejecutando"] is False
+    assert any(e.get("total") == 10 for e in escritos)
+    assert any(e.get("etapa") == "importando" and e.get("ejecutando") for e in escritos)

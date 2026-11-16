@@ -478,6 +478,18 @@ def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: fl
     return "\n".join(lineas)
 
 
+def escribir_informe(
+    resultados: list[Resultado], faltantes: dict[str, int], segundos: float, destino: Path | None = None
+) -> Path:
+    """Escribe el informe Markdown (por defecto en `logs/importacion-*.md`) y devuelve su ruta."""
+    destino = destino or Path(__file__).resolve().parents[5] / "logs" / (
+        f"importacion-{timezone.localtime():%Y-%m-%d-%H%M}.md"
+    )
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text(informe(resultados, faltantes, segundos), encoding="utf-8")
+    return destino
+
+
 class Command(BaseCommand):
     help = "Importa el dump legado de MySQL (10 tablas de datos y usuarios) a PostgreSQL."
 
@@ -505,9 +517,5 @@ class Command(BaseCommand):
                 f"{r.tabla:26} origen={r.origen:>7} insertadas={r.insertadas:>7} "
                 f"rechazadas={r.rechazadas:>4} duplicadas={r.duplicadas:>4} omitidas={r.omitidas:>4}"
             )
-        destino = opciones["informe"] or Path(__file__).resolve().parents[5] / "logs" / (
-            f"importacion-{timezone.localtime():%Y-%m-%d-%H%M}.md"
-        )
-        destino.parent.mkdir(parents=True, exist_ok=True)
-        destino.write_text(informe(resultados, faltantes, time.monotonic() - inicio), encoding="utf-8")
+        destino = escribir_informe(resultados, faltantes, time.monotonic() - inicio, opciones["informe"])
         self.stdout.write(self.style.SUCCESS(f"Informe: {destino}"))
