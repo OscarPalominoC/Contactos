@@ -81,3 +81,58 @@ class RespaldoEjecucionResponseSerializer(serializers.Serializer):
     ruta_destino = serializers.CharField(help_text="Carpeta del servidor donde se guardará el archivo.")
     iniciado_en = serializers.CharField(help_text="Marca de tiempo ISO del inicio.")
 
+
+class ArchivoSqlItemSerializer(serializers.Serializer):
+    """Detalle de un archivo .sql encontrado al explorar carpetas en el servidor."""
+
+    nombre = serializers.CharField(help_text="Nombre del archivo con extensión.")
+    ruta_completa = serializers.CharField(help_text="Ruta absoluta completa del archivo en el servidor.")
+    tamano_bytes = serializers.IntegerField(help_text="Tamaño del archivo en bytes.")
+    tamano_formateado = serializers.CharField(help_text="Tamaño formateado en KB, MB o GB.")
+    modificado_en = serializers.CharField(help_text="Fecha de última modificación en formato ISO.")
+
+
+class ExploracionRutaResponseSerializer(serializers.Serializer):
+    """Resultado de la exploración de carpetas y archivos en el servidor."""
+
+    ruta_actual = serializers.CharField(help_text="Ruta absoluta de la carpeta explorada.")
+    ruta_padre = serializers.CharField(
+        allow_null=True, required=False, help_text="Ruta absoluta de la carpeta superior o null si es raíz."
+    )
+    carpetas = serializers.ListField(
+        child=serializers.CharField(), help_text="Lista de nombres de subcarpetas disponibles."
+    )
+    archivos_sql = ArchivoSqlItemSerializer(
+        many=True, help_text="Lista de archivos .sql disponibles en esta carpeta."
+    )
+    unidades_disponibles = serializers.ListField(
+        child=serializers.CharField(), help_text="Letras de unidades o raíces montadas en el servidor."
+    )
+
+
+class RestaurarRespaldoRequestSerializer(serializers.Serializer):
+    """Solicitud para restaurar la base de datos desde un archivo SQL."""
+
+    ruta_archivo = serializers.CharField(
+        max_length=500,
+        required=True,
+        help_text="Ruta absoluta en el disco del servidor al archivo .sql que se desea restaurar.",
+    )
+
+
+class RestaurarRespaldoResponseSerializer(serializers.Serializer):
+    """Confirmación del inicio del proceso de restauración de la base de datos."""
+
+    mensaje = serializers.CharField(help_text="Mensaje descriptivo del inicio de la restauración.")
+    archivo = serializers.CharField(help_text="Nombre del archivo SQL que se está restaurando.")
+    iniciado_en = serializers.CharField(help_text="Marca de tiempo ISO del inicio.")
+
+
+class SubirRespaldoResponseSerializer(serializers.Serializer):
+    """Respuesta al subir un archivo de respaldo al servidor."""
+
+    mensaje = serializers.CharField(help_text="Confirmación de la carga del archivo.")
+    archivo = serializers.CharField(help_text="Nombre del archivo subido.")
+    ruta_completa = serializers.CharField(help_text="Ruta completa donde quedó almacenado en el servidor.")
+    tamano_formateado = serializers.CharField(help_text="Tamaño del archivo subido.")
+

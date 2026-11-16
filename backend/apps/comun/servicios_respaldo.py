@@ -359,3 +359,251 @@ def ejecutar_respaldo_consola(ruta_destino: Path | None = None) -> dict[str, Any
         "ruta_destino": str(ruta_valida),
         "iniciado_en": ahora.isoformat(),
     }
+
+
+CARPETAS_IGNORADAS = {
+    "$recycle.bin",
+    "system volume information",
+    ".git",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".idea",
+    ".vscode",
+    "pagefile.sys",
+    "swapfile.sys",
+    "dumpstack.log.tmp",
+}
+
+RUTAS_PSQL = [
+    Path(r"C:\Program Files\PostgreSQL\18\bin\psql.exe"),
+    Path(r"C:\Program Files\PostgreSQL\17\bin\psql.exe"),
+    Path(r"C:\Program Files\PostgreSQL\16\bin\psql.exe"),
+    Path("/usr/bin/psql"),
+    Path("/usr/local/bin/psql"),
+]
+
+
+def buscar_psql() -> str:
+    """Localiza el binario ejecutable de psql en el servidor."""
+    for ruta in RUTAS_PSQL:
+        if ruta.exists():
+            return str(ruta)
+    import shutil
+
+    hallado = shutil.which("psql")
+    if hallado:
+        return hallado
+    raise FileNotFoundError("No se encontró el ejecutable 'psql' en el servidor.")
+
+
+def mapear_posix_a_ruta_windows(ruta: Path | str) -> str:
+    """Traduce una ruta interna Linux (/mnt/f/Prueba) o POSIX a representación de Windows (F:\\Prueba)."""
+    s = str(ruta).replace("\\", "/")
+    m = re.match(r"^/mnt/([a-zA-Z])(?:/(.*))?$", s)
+    if m:
+        letra = m.group(1).upper()
+        resto = (m.group(2) or "").strip("/").replace("/", "\\")
+        return f"{letra}:\\{resto}" if resto else f"{letra}:\\"
+    if s.startswith("/app"):
+        resto = s[4:].strip("/").replace("/", "\\")
+        return f"F:\\Check\\{resto}" if resto else "F:\\Check"
+    m_win = re.match(r"^([a-zA-Z]):[\\/](.*)$", s)
+    if m_win:
+        letra = m_win.group(1).upper()
+        resto = m_win.group(2).replace("/", "\\")
+        return f"{letra}:\\{resto}" if resto else f"{letra}:\\"
+    return str(ruta)
+
+
+def obtener_unidades_disponibles() -> list[str]:
+    """Retorna las unidades de disco o puntos de montaje principales disponibles en el servidor."""
+    unidades: list[str] = []
+    if os.name == "nt":
+        for letra in ["C", "D", "E", "F", "Z"]:
+            if Path(f"{letra}:/").exists():
+                unidades.append(f"{letra}:\\")
+    else:
+        for letra in ["c", "d", "e", "f", "z"]:
+            if Path(f"/mnt/{letra}").exists():
+                unidades.append(f"{letra.upper()}:\\")
+        if not unidades:
+            unidades.append("/")
+    return sorted(unidades)
+
+
+def explorar_directorio_servidor(ruta_str: str | None = None) -> dict[str, Any]:
+    """
+    Explora una carpeta del servidor listando subcarpetas y archivos .sql disponibles.
+    Si ruta_str no se suministra, inicia en la carpeta configurada de respaldos.
+    """
+    if ruta_str:
+        limpio = ruta_str.strip()
+        if not es_ruta_absoluta(limpio):
+            from apps.comun.excepciones import DatosInvalidos
+
+            raise DatosInvalidos(f"La ruta '{limpio}' debe ser absoluta (ej: F:\\Prueba).")
+        ruta_sistema = resolver_ruta_sistema(limpio)
+    else:
+        ruta_sistema = obtener_ruta_respaldo()
+        limpio = obtener_ruta_configurada_display()
+
+    if not ruta_sistema.exists():
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(f"La carpeta '{limpio or str(ruta_sistema)}' no existe en el disco del servidor.")
+
+    if not ruta_sistema.is_dir():
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(f"La ruta '{limpio or str(ruta_sistema)}' no corresponde a una carpeta.")
+
+    carpetas: list[str] = []
+    archivos_sql: list[dict[str, Any]] = []
+
+    try:
+        for entrada in ruta_sistema.iterdir():
+            nombre_lower = entrada.name.lower()
+            if nombre_lower in CARPETAS_IGNORADAS or entrada.name.startswith("."):
+                continue
+            if entrada.is_dir():
+                carpetas.append(entrada.name)
+            elif entrada.is_file() and nombre_lower.endswith(".sql"):
+                stat = entrada.stat()
+                mtime_dt = datetime.fromtimestamp(stat.st_mtime, tz=timezone.get_current_timezone())
+                ruta_display = mapear_posix_a_ruta_windows(entrada)
+                archivos_sql.append(
+                    {
+                        "nombre": entrada.name,
+                        "ruta_completa": ruta_display,
+                        "tamano_bytes": stat.st_size,
+                        "tamano_formateado": formatear_tamano(stat.st_size),
+                        "modificado_en": mtime_dt.isoformat(),
+                    }
+                )
+    except PermissionError as exc:
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(f"Permiso denegado al acceder a '{limpio}': {exc}")
+
+    carpetas.sort(key=str.lower)
+    archivos_sql.sort(key=lambda a: a["nombre"].lower())
+
+    ruta_actual_display = mapear_posix_a_ruta_windows(ruta_sistema)
+    ruta_padre_display: str | None = None
+    padre = ruta_sistema.parent
+    if padre and padre != ruta_sistema and str(padre) not in ("/", "/mnt", "\\", "."):
+        ruta_padre_display = mapear_posix_a_ruta_windows(padre)
+
+    return {
+        "ruta_actual": ruta_actual_display,
+        "ruta_padre": ruta_padre_display,
+        "carpetas": carpetas,
+        "archivos_sql": archivos_sql,
+        "unidades_disponibles": obtener_unidades_disponibles(),
+    }
+
+
+def guardar_archivo_respaldo_subido(archivo: Any) -> dict[str, Any]:
+    """Guarda un archivo de respaldo .sql subido en la carpeta configurada del servidor."""
+    nombre = getattr(archivo, "name", "")
+    if not nombre.lower().endswith(".sql"):
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos("El archivo debe tener extensión .sql")
+
+    destino_dir = obtener_ruta_respaldo()
+    destino_dir.mkdir(parents=True, exist_ok=True)
+    nombre_seguro = re.sub(r"[^\w\s\-\.]", "_", Path(nombre).name)
+    ruta_destino = destino_dir / nombre_seguro
+
+    with open(ruta_destino, "wb") as f_dest:
+        for chunk in archivo.chunks():
+            f_dest.write(chunk)
+
+    stat = ruta_destino.stat()
+    return {
+        "mensaje": "Archivo de respaldo subido exitosamente al servidor.",
+        "archivo": nombre_seguro,
+        "ruta_completa": mapear_posix_a_ruta_windows(ruta_destino),
+        "tamano_formateado": formatear_tamano(stat.st_size),
+    }
+
+
+def ejecutar_restauracion_consola(ruta_archivo_str: str) -> dict[str, Any]:
+    """Lanza la restauración de la base de datos como subproceso de consola en el servidor."""
+    estado = leer_estado_ejecucion()
+    if estado.get("ejecutando"):
+        from apps.comun.excepciones import Conflicto
+
+        raise Conflicto("Ya hay una operación de base de datos en ejecución en el servidor.")
+
+    limpio = (ruta_archivo_str or "").strip()
+    if not limpio:
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos("Debe especificar la ruta del archivo .sql a restaurar.")
+
+    if not es_ruta_absoluta(limpio):
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(f"La ruta '{limpio}' debe ser absoluta (ej: F:\\Prueba\\respaldo.sql).")
+
+    ruta_archivo = resolver_ruta_sistema(limpio)
+    if not ruta_archivo.exists():
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(f"El archivo '{limpio}' no existe en el disco del servidor.")
+
+    if not ruta_archivo.is_file():
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(f"La ruta '{limpio}' no corresponde a un archivo.")
+
+    if not ruta_archivo.name.lower().endswith(".sql"):
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos("El archivo a restaurar debe tener extensión .sql")
+
+    ahora = timezone.now()
+    nuevo_estado = {
+        "ejecutando": True,
+        "accion": "restaurar",
+        "iniciado_en": ahora.isoformat(),
+        "archivo_origen": str(ruta_archivo),
+    }
+    escribir_estado_ejecucion(nuevo_estado)
+
+    manage_py = settings.BASE_DIR / "manage.py"
+    comando = [
+        sys.executable,
+        str(manage_py),
+        "restaurar_base_datos",
+        "--origen",
+        str(ruta_archivo),
+    ]
+
+    log_consola = settings.BASE_DIR.parent / "logs" / "restauracion_consola.log"
+    log_consola.parent.mkdir(parents=True, exist_ok=True)
+
+    flags = 0
+    if sys.platform == "win32":
+        flags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+
+    with open(log_consola, "a", encoding="utf-8") as archivo_log:
+        archivo_log.write(f"\n--- Inicio de restauración por consola: {ahora.isoformat()} ---\n")
+        subprocess.Popen(
+            comando,
+            cwd=str(settings.BASE_DIR),
+            stdout=archivo_log,
+            stderr=subprocess.STDOUT,
+            creationflags=flags,
+        )
+
+    logger.info("Restauración por consola lanzada hacia: %s", ruta_archivo)
+    return {
+        "mensaje": "Restauración de la base de datos iniciada por consola en el servidor.",
+        "archivo": ruta_archivo.name,
+        "iniciado_en": ahora.isoformat(),
+    }
+

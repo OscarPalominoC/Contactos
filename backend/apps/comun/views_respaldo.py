@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -14,16 +15,23 @@ from rest_framework.views import APIView
 from apps.comun.excepciones import DatosInvalidos, PermisoDenegado
 from apps.comun.serializers_respaldo import (
     EsServidorResponseSerializer,
+    ExploracionRutaResponseSerializer,
     RespaldoEjecucionResponseSerializer,
     RespaldoEstadoResponseSerializer,
+    RestaurarRespaldoRequestSerializer,
+    RestaurarRespaldoResponseSerializer,
     RutaConfigRequestSerializer,
     RutaConfigResponseSerializer,
     RutaValidacionRequestSerializer,
     RutaValidacionResponseSerializer,
+    SubirRespaldoResponseSerializer,
 )
 from apps.comun.servicios_respaldo import (
     ejecutar_respaldo_consola,
+    ejecutar_restauracion_consola,
     es_cliente_servidor_local,
+    explorar_directorio_servidor,
+    guardar_archivo_respaldo_subido,
     guardar_ruta_respaldo,
     obtener_estado_respaldo,
     validar_ruta_servidor,
@@ -160,4 +168,92 @@ class VistaEjecutarRespaldo(IdempotenciaMixin, APIView):
         resultado = ejecutar_respaldo_consola()
         serializer = RespaldoEjecucionResponseSerializer(resultado)
         return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
+
+
+class VistaExplorarArchivosRespaldo(APIView):
+    """Explora carpetas y archivos .sql en el disco del servidor. Solo ejecutable desde el equipo servidor."""
+
+    permission_classes = [CambioClaveCompletado, SoloAdministrador]
+
+    @extend_schema(
+        summary="Explorar carpetas y respaldos en el servidor",
+        description="Lista subdirectorios y archivos .sql en la ruta indicada del servidor. Restringido al equipo servidor.",
+        tags=["Respaldos"],
+        parameters=[
+            {
+                "name": "ruta",
+                "in": "query",
+                "required": False,
+                "description": "Ruta absoluta de la carpeta a explorar. Si se omite, se usa la configurada de respaldos.",
+                "schema": {"type": "string"},
+            }
+        ],
+        responses={200: ExploracionRutaResponseSerializer},
+    )
+    def get(self, request: Request) -> Response:
+        if not es_cliente_servidor_local(request._request):
+            raise PermisoDenegado(
+                "La exploración de archivos del servidor solo puede realizarse directamente desde el equipo servidor."
+            )
+
+        ruta_param = request.query_params.get("ruta")
+        resultado = explorar_directorio_servidor(ruta_param)
+        serializer = ExploracionRutaResponseSerializer(resultado)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class VistaRestaurarRespaldo(IdempotenciaMixin, APIView):
+    """Ejecuta la restauración de la base de datos desde un archivo SQL. Restringido al equipo servidor."""
+
+    permission_classes = [CambioClaveCompletado, SoloAdministrador]
+
+    @extend_schema(
+        summary="Restaurar base de datos en el servidor por consola",
+        description="Inicia la restauración de la base de datos con psql a partir de un archivo .sql seleccionado.",
+        tags=["Respaldos"],
+        request=RestaurarRespaldoRequestSerializer,
+        responses={202: RestaurarRespaldoResponseSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        if not es_cliente_servidor_local(request._request):
+            raise PermisoDenegado(
+                "La restauración de la base de datos solo puede ser solicitada directamente desde el equipo servidor."
+            )
+
+        datos = RestaurarRespaldoRequestSerializer(data=request.data)
+        datos.is_valid(raise_exception=True)
+        ruta_archivo = datos.validated_data["ruta_archivo"]
+
+        resultado = ejecutar_restauracion_consola(ruta_archivo)
+        serializer = RestaurarRespaldoResponseSerializer(resultado)
+        return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
+
+
+class VistaSubirRespaldo(APIView):
+    """Recibe un archivo .sql y lo almacena en la carpeta de respaldos del servidor."""
+
+    permission_classes = [CambioClaveCompletado, SoloAdministrador]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @extend_schema(
+        summary="Subir archivo .sql de respaldo al servidor",
+        description="Carga un archivo de respaldo al disco del servidor para su posterior restauración.",
+        tags=["Respaldos"],
+        request={"multipart/form-data": {"type": "object", "properties": {"archivo": {"type": "string", "format": "binary"}}}},
+        responses={201: SubirRespaldoResponseSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        if not es_cliente_servidor_local(request._request):
+            raise PermisoDenegado(
+                "La carga de archivos de respaldo solo puede realizarse directamente desde el equipo servidor."
+            )
+
+        archivo = request.FILES.get("archivo")
+        if not archivo:
+            raise DatosInvalidos("Debe adjuntar un archivo de respaldo con el campo 'archivo'.")
+
+        resultado = guardar_archivo_respaldo_subido(archivo)
+        serializer = SubirRespaldoResponseSerializer(resultado)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 

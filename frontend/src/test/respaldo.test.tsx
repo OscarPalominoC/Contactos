@@ -163,4 +163,134 @@ describe("TarjetaRespaldo", () => {
     );
     expect(await screen.findByText("Copia de seguridad iniciada por consola en el servidor.")).toBeInTheDocument();
   });
+
+  it("muestra las pestañas estilo explorador web y permite alternar entre ellas", async () => {
+    const user = userEvent.setup();
+    vi.mocked(recursos.obtener).mockImplementation((url: string) => {
+      if (url === "/respaldos/es-servidor") {
+        return Promise.resolve({ es_servidor: true });
+      }
+      if (url.startsWith("/respaldos/explorar")) {
+        return Promise.resolve({
+          ruta_actual: "F:\\Check\\respaldos",
+          ruta_padre: "F:\\Check",
+          carpetas: [],
+          archivos_sql: [],
+          unidades_disponibles: ["C:\\", "F:\\"],
+        });
+      }
+      return Promise.resolve(estadoBase);
+    });
+
+    renderizar();
+
+    const tabGenerar = await screen.findByRole("tab", { name: /generar respaldo/i });
+    const tabCargar = screen.getByRole("tab", { name: /cargar respaldo/i });
+
+    expect(tabGenerar).toHaveAttribute("aria-selected", "true");
+    expect(tabCargar).toHaveAttribute("aria-selected", "false");
+
+    await user.click(tabCargar);
+
+    expect(tabGenerar).toHaveAttribute("aria-selected", "false");
+    expect(tabCargar).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: /cargar y restaurar respaldo al sistema/i })).toBeInTheDocument();
+  });
+
+  it("explora archivos del servidor en la pestaña Cargar y permite seleccionar un archivo .sql", async () => {
+    const user = userEvent.setup();
+    vi.mocked(recursos.obtener).mockImplementation((url: string) => {
+      if (url === "/respaldos/es-servidor") {
+        return Promise.resolve({ es_servidor: true });
+      }
+      if (url.startsWith("/respaldos/explorar")) {
+        return Promise.resolve({
+          ruta_actual: "F:\\Prueba",
+          ruta_padre: "F:\\",
+          carpetas: ["historicos"],
+          archivos_sql: [
+            {
+              nombre: "check_contactos-16-11-2026.sql",
+              ruta_completa: "F:\\Prueba\\check_contactos-16-11-2026.sql",
+              tamano_bytes: 114815585,
+              tamano_formateado: "109.5 MB",
+              modificado_en: "2026-11-16T16:45:00-05:00",
+            },
+          ],
+          unidades_disponibles: ["C:\\", "D:\\", "F:\\"],
+        });
+      }
+      return Promise.resolve(estadoBase);
+    });
+
+    renderizar();
+
+    const tabCargar = await screen.findByRole("tab", { name: /cargar respaldo/i });
+    await user.click(tabCargar);
+
+    expect(await screen.findByText("check_contactos-16-11-2026.sql")).toBeInTheDocument();
+    expect(screen.getByText(/109.5 MB/)).toBeInTheDocument();
+    expect(screen.getByText("historicos")).toBeInTheDocument();
+
+    const botonSeleccionar = screen.getByRole("button", { name: /^seleccionar$/i });
+    await user.click(botonSeleccionar);
+
+    expect(await screen.findByText(/archivo preparado para restaurar: check_contactos-16-11-2026\.sql/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /cargar respaldo al sistema \(\.sql\)/i })).toBeInTheDocument();
+  });
+
+  it("confirma la restauración de la base de datos al aceptar el diálogo", async () => {
+    const user = userEvent.setup();
+    vi.mocked(recursos.obtener).mockImplementation((url: string) => {
+      if (url === "/respaldos/es-servidor") {
+        return Promise.resolve({ es_servidor: true });
+      }
+      if (url.startsWith("/respaldos/explorar")) {
+        return Promise.resolve({
+          ruta_actual: "F:\\Prueba",
+          ruta_padre: "F:\\",
+          carpetas: [],
+          archivos_sql: [
+            {
+              nombre: "check_contactos-16-11-2026.sql",
+              ruta_completa: "F:\\Prueba\\check_contactos-16-11-2026.sql",
+              tamano_bytes: 114815585,
+              tamano_formateado: "109.5 MB",
+              modificado_en: "2026-11-16T16:45:00-05:00",
+            },
+          ],
+          unidades_disponibles: ["F:\\"],
+        });
+      }
+      return Promise.resolve(estadoBase);
+    });
+    vi.mocked(recursos.crear).mockResolvedValueOnce({
+      mensaje: "Restauración de la base de datos iniciada por consola en el servidor.",
+      archivo: "check_contactos-16-11-2026.sql",
+      iniciado_en: "2026-11-16T14:00:00-05:00",
+    });
+
+    renderizar();
+
+    const tabCargar = await screen.findByRole("tab", { name: /cargar respaldo/i });
+    await user.click(tabCargar);
+
+    const botonSeleccionar = await screen.findByRole("button", { name: /^seleccionar$/i });
+    await user.click(botonSeleccionar);
+
+    const botonCargar = screen.getByRole("button", { name: /cargar respaldo al sistema \(\.sql\)/i });
+    await user.click(botonCargar);
+
+    // Se abre el diálogo modal
+    expect(screen.getByText("Confirmar restauración de base de datos")).toBeInTheDocument();
+    const botonConfirmar = screen.getByRole("button", { name: /sí, restaurar base de datos/i });
+    await user.click(botonConfirmar);
+
+    expect(recursos.crear).toHaveBeenCalledWith(
+      "/respaldos/restaurar",
+      expect.anything(),
+      { ruta_archivo: "F:\\Prueba\\check_contactos-16-11-2026.sql" },
+    );
+    expect(await screen.findByText("Restauración de la base de datos iniciada por consola en el servidor.")).toBeInTheDocument();
+  });
 });

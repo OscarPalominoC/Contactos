@@ -238,3 +238,36 @@ export const respaldoEjecucionResponseSchema = z.object({
   iniciado_en: z.string(),
 });
 export type RespaldoEjecucionResponse = z.infer<typeof respaldoEjecucionResponseSchema>;
+
+export const archivoSqlItemSchema = z.object({
+  nombre: z.string(),
+  ruta_completa: z.string(),
+  tamano_bytes: z.number(),
+  tamano_formateado: z.string(),
+  modificado_en: z.string(),
+});
+export type ArchivoSqlItem = z.infer<typeof archivoSqlItemSchema>;
+
+export const exploracionRutaResponseSchema = z.object({
+  ruta_actual: z.string(),
+  ruta_padre: z.string().nullable().optional(),
+  carpetas: z.array(z.string()),
+  archivos_sql: z.array(archivoSqlItemSchema),
+  unidades_disponibles: z.array(z.string()),
+});
+export type ExploracionRutaResponse = z.infer<typeof exploracionRutaResponseSchema>;
+
+export const restaurarRespaldoResponseSchema = z.object({
+  mensaje: z.string(),
+  archivo: z.string(),
+  iniciado_en: z.string(),
+});
+export type RestaurarRespaldoResponse = z.infer<typeof restaurarRespaldoResponseSchema>;
+
+export const subirRespaldoResponseSchema = z.object({
+  mensaje: z.string(),
+  archivo: z.string(),
+  ruta_completa: z.string(),
+  tamano_formateado: z.string(),
+});
+export type SubirRespaldoResponse = z.infer<typeof subirRespaldoResponseSchema>;

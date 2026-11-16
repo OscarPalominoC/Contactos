@@ -61,16 +61,25 @@ export function normalizarError(error: unknown): ApiError {
   if (axios.isAxiosError(error)) {
     const datos = error.response?.data as Partial<ProblemDetail> | undefined;
     const status = error.response?.status ?? 0;
+
+    let detalle = "Ocurrió un error inesperado.";
+    if (typeof datos?.detail === "string") {
+      detalle = datos.detail;
+    } else if (status === 413) {
+      detalle = "El archivo es demasiado grande para ser subido directamente por la red. Si el archivo ya se encuentra en el servidor (ej: en F:\\Check), selecciónalo directamente desde el explorador superior.";
+    } else if (status === 404) {
+      detalle = "El recurso solicitado no fue encontrado en el servidor.";
+    } else if (status === 403) {
+      detalle = "No tienes permiso para realizar esta acción.";
+    } else if (!status) {
+      detalle = "No fue posible comunicarse con el servidor. Verifique que el backend esté en ejecución.";
+    }
+
     return new ApiError({
       type: datos?.type ?? (status ? `/problemas/${status}` : "/problemas/red"),
-      title: datos?.title ?? (status ? "Error" : "Sin conexión"),
+      title: datos?.title ?? (status === 413 ? "Archivo demasiado grande" : status ? "Error" : "Sin conexión"),
       status,
-      detail:
-        typeof datos?.detail === "string"
-          ? datos.detail
-          : status
-            ? "Ocurrió un error inesperado."
-            : "No fue posible comunicarse con el servidor. Verifique que el backend esté en ejecución.",
+      detail: detalle,
       instance: datos?.instance,
       request_id: datos?.request_id ?? error.response?.headers?.["x-request-id"],
       errors: datos?.errors,

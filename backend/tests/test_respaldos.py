@@ -32,6 +32,9 @@ ES_SERVIDOR_URL = "/api/v1/respaldos/es-servidor"
 VALIDAR_URL = "/api/v1/respaldos/validar-ruta"
 CONFIGURAR_URL = "/api/v1/respaldos/configurar-ruta"
 EJECUTAR_URL = "/api/v1/respaldos/ejecutar"
+EXPLORAR_URL = "/api/v1/respaldos/explorar"
+RESTAURAR_URL = "/api/v1/respaldos/restaurar"
+SUBIR_URL = "/api/v1/respaldos/subir"
 
 
 @pytest.fixture(autouse=True)
@@ -408,3 +411,177 @@ def test_comando_management_respalda_y_depura_antiguos(
     # Debe haber depurado para que queden máximo 14
     sqls_restantes = list(tmp_path.glob("*.sql"))
     assert len(sqls_restantes) <= 14
+
+
+# ==============================================================================
+# Pruebas TDD para Exploración de Archivos y Restauración / Carga de Respaldo
+# ==============================================================================
+
+def test_explorar_rechaza_dispositivo_remoto(api_admin: ClienteApi):
+    resp = api_admin.get(EXPLORAR_URL, REMOTE_ADDR="192.168.1.150")
+    assert resp.status_code == 403
+    assert "solo puede realizarse directamente desde el equipo servidor" in resp.data["detail"]
+
+
+def test_explorar_requiere_administrador(api_usuario: ClienteApi):
+    resp = api_usuario.get(EXPLORAR_URL, REMOTE_ADDR="127.0.0.1")
+    assert resp.status_code == 403
+
+
+def test_explorar_directorio_exitoso(api_admin: ClienteApi, tmp_path: Path):
+    # Crear carpetas hijas y archivos sql
+    carpeta_a = tmp_path / "subcarpeta_a"
+    carpeta_a.mkdir()
+    carpeta_b = tmp_path / "subcarpeta_b"
+    carpeta_b.mkdir()
+
+    sql1 = tmp_path / "backup_2026.sql"
+    sql1.write_text("CREATE TABLE test();", encoding="utf-8")
+    sql2 = tmp_path / "otro_backup.sql"
+    sql2.write_text("CREATE TABLE test2();", encoding="utf-8")
+
+    # Archivo no sql que no debe aparecer en archivos_sql
+    txt = tmp_path / "notas.txt"
+    txt.write_text("notas", encoding="utf-8")
+
+    resp = api_admin.get(f"{EXPLORAR_URL}?ruta={tmp_path}", REMOTE_ADDR="127.0.0.1")
+    assert resp.status_code == 200
+    datos = resp.data
+    assert "ruta_actual" in datos
+    assert "carpetas" in datos
+    assert "subcarpeta_a" in datos["carpetas"]
+    assert "subcarpeta_b" in datos["carpetas"]
+    assert "archivos_sql" in datos
+    nombres_sql = [a["nombre"] for a in datos["archivos_sql"]]
+    assert "backup_2026.sql" in nombres_sql
+    assert "otro_backup.sql" in nombres_sql
+    assert "notas.txt" not in nombres_sql
+    assert "unidades_disponibles" in datos
+    assert len(datos["unidades_disponibles"]) > 0
+
+
+def test_explorar_directorio_inexistente(api_admin: ClienteApi, tmp_path: Path):
+    no_existe = tmp_path / "no_existe_carpeta_123"
+    resp = api_admin.get(f"{EXPLORAR_URL}?ruta={no_existe}", REMOTE_ADDR="127.0.0.1")
+    assert resp.status_code == 422
+    assert "no existe" in resp.data["detail"]
+
+
+def test_explorar_ruta_relativa_invalida(api_admin: ClienteApi):
+    resp = api_admin.get(f"{EXPLORAR_URL}?ruta=carpeta_relativa", REMOTE_ADDR="127.0.0.1")
+    assert resp.status_code == 422
+    assert "debe ser absoluta" in resp.data["detail"]
+
+
+def test_restaurar_rechaza_dispositivo_remoto(api_admin: ClienteApi, tmp_path: Path):
+    archivo_sql = tmp_path / "backup.sql"
+    archivo_sql.write_text("SELECT 1;", encoding="utf-8")
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo_sql)},
+        REMOTE_ADDR="192.168.1.150",
+        HTTP_IDEMPOTENCY_KEY="key-restaurar-remoto",
+    )
+    assert resp.status_code == 403
+
+
+def test_restaurar_archivo_inexistente(api_admin: ClienteApi, tmp_path: Path):
+    archivo_falso = tmp_path / "archivo_fantasma.sql"
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo_falso)},
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_IDEMPOTENCY_KEY="key-restaurar-falso",
+    )
+    assert resp.status_code == 422
+    assert "no existe" in resp.data["detail"]
+
+
+def test_restaurar_archivo_no_sql(api_admin: ClienteApi, tmp_path: Path):
+    archivo_txt = tmp_path / "archivo.txt"
+    archivo_txt.write_text("hola", encoding="utf-8")
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo_txt)},
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_IDEMPOTENCY_KEY="key-restaurar-no-sql",
+    )
+    assert resp.status_code == 422
+    assert "extensión .sql" in resp.data["detail"]
+
+
+@patch("apps.comun.servicios_respaldo.subprocess.Popen")
+def test_restaurar_exitoso_lanza_consola(mock_popen: MagicMock, api_admin: ClienteApi, tmp_path: Path):
+    archivo_sql = tmp_path / "check_contactos-16-11-2026.sql"
+    archivo_sql.write_text("CREATE TABLE test();", encoding="utf-8")
+
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo_sql)},
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_IDEMPOTENCY_KEY="key-restaurar-ok",
+    )
+    assert resp.status_code == 202
+    assert "iniciada por consola en el servidor" in resp.data["mensaje"]
+    assert resp.data["archivo"] == archivo_sql.name
+    assert mock_popen.called
+
+
+def test_subir_respaldo_rechaza_remoto(api_admin: ClienteApi):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    archivo = SimpleUploadedFile("backup.sql", b"SELECT 1;", content_type="application/sql")
+    resp = api_admin.post(
+        SUBIR_URL,
+        {"archivo": archivo},
+        format="multipart",
+        REMOTE_ADDR="192.168.1.150",
+    )
+    assert resp.status_code == 403
+
+
+def test_subir_respaldo_rechaza_no_sql(api_admin: ClienteApi):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    archivo = SimpleUploadedFile("script.py", b"print('hola')", content_type="text/x-python")
+    resp = api_admin.post(
+        SUBIR_URL,
+        {"archivo": archivo},
+        format="multipart",
+        REMOTE_ADDR="127.0.0.1",
+    )
+    assert resp.status_code == 422
+    assert "extensión .sql" in resp.data["detail"]
+
+
+def test_subir_respaldo_exitoso(api_admin: ClienteApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    from apps.comun import servicios_respaldo
+    monkeypatch.setattr(servicios_respaldo, "obtener_ruta_respaldo", lambda: tmp_path)
+
+    archivo = SimpleUploadedFile("mi_backup.sql", b"CREATE TABLE x();", content_type="application/sql")
+    resp = api_admin.post(
+        SUBIR_URL,
+        {"archivo": archivo},
+        format="multipart",
+        REMOTE_ADDR="127.0.0.1",
+    )
+    assert resp.status_code == 201
+    assert resp.data["archivo"] == "mi_backup.sql"
+    assert (tmp_path / "mi_backup.sql").exists()
+
+
+@patch("apps.comun.management.commands.restaurar_base_datos.subprocess.run")
+@patch("apps.comun.management.commands.restaurar_base_datos.buscar_psql")
+def test_comando_management_restaurar_base_datos(mock_buscar_psql: MagicMock, mock_run: MagicMock, tmp_path: Path):
+    mock_buscar_psql.return_value = "psql.exe"
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_run.return_value = mock_proc
+
+    archivo_sql = tmp_path / "respaldo.sql"
+    archivo_sql.write_text("CREATE TABLE test();", encoding="utf-8")
+
+    call_command("restaurar_base_datos", origen=str(archivo_sql))
+    assert mock_run.called
+    args = mock_run.call_args[0][0]
+    assert "-f" in args
+    assert str(archivo_sql) in args

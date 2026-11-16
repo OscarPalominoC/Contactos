@@ -8,6 +8,9 @@ from apps.comun.views_respaldo import (
     VistaEjecutarRespaldo,
     VistaEsServidor,
     VistaEstadoRespaldo,
+    VistaExplorarArchivosRespaldo,
+    VistaRestaurarRespaldo,
+    VistaSubirRespaldo,
     VistaValidarRutaRespaldo,
 )
 from apps.contactos.views import ContactoViewSet
@@ -36,5 +39,8 @@ urlpatterns = [
     path("respaldos/validar-ruta", VistaValidarRutaRespaldo.as_view(), name="respaldos-validar-ruta"),
     path("respaldos/configurar-ruta", VistaConfigurarRutaRespaldo.as_view(), name="respaldos-configurar-ruta"),
     path("respaldos/ejecutar", VistaEjecutarRespaldo.as_view(), name="respaldos-ejecutar"),
+    path("respaldos/explorar", VistaExplorarArchivosRespaldo.as_view(), name="respaldos-explorar"),
+    path("respaldos/restaurar", VistaRestaurarRespaldo.as_view(), name="respaldos-restaurar"),
+    path("respaldos/subir", VistaSubirRespaldo.as_view(), name="respaldos-subir"),
     *router.urls,
 ]
