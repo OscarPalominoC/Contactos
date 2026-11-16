@@ -37,6 +37,7 @@ EJECUTAR_URL = "/api/v1/respaldos/ejecutar"
 EXPLORAR_URL = "/api/v1/respaldos/explorar"
 RESTAURAR_URL = "/api/v1/respaldos/restaurar"
 SUBIR_URL = "/api/v1/respaldos/subir"
+ANALIZAR_URL = "/api/v1/respaldos/analizar"
 
 
 @pytest.fixture(autouse=True)
@@ -515,7 +516,7 @@ def test_restaurar_archivo_no_sql(api_admin: ClienteApi, tmp_path: Path):
 @patch("apps.comun.servicios_respaldo.subprocess.Popen")
 def test_restaurar_exitoso_lanza_consola(mock_popen: MagicMock, api_admin: ClienteApi, tmp_path: Path):
     archivo_sql = tmp_path / "check_contactos-16-11-2026.sql"
-    archivo_sql.write_text("CREATE TABLE test();", encoding="utf-8")
+    archivo_sql.write_text(volcado_postgres(), encoding="utf-8")
 
     resp = api_admin.post(
         RESTAURAR_URL,
@@ -674,3 +675,112 @@ def test_restaurar_legado_reporta_progreso(tmp_path: Path):
     assert final["ejecutando"] is False
     assert any(e.get("total") == 10 for e in escritos)
     assert any(e.get("etapa") == "importando" and e.get("ejecutando") for e in escritos)
+
+
+# --- Análisis previo, opción de usuarios y subida sin sobrescribir ---------------------------
+
+
+def _volcado_en(tmp_path: Path, **kwargs) -> Path:
+    archivo = tmp_path / "legado.sql"
+    archivo.write_bytes(volcado_mysql(DUMP_SINTETICO, **kwargs).encode("latin-1"))
+    return archivo
+
+
+def test_analizar_devuelve_informe(api_admin: ClienteApi, tmp_path: Path):
+    archivo = _volcado_en(tmp_path)
+    resp = api_admin.post(
+        ANALIZAR_URL, {"ruta_archivo": str(archivo)}, REMOTE_ADDR="127.0.0.1", HTTP_IDEMPOTENCY_KEY="k-analizar-1"
+    )
+    assert resp.status_code == 200
+    assert resp.data["valido"] is True
+    assert resp.data["tipo"] == "mysql_legado"
+    assert resp.data["tablas_importables"][0]["nombre"] == "marca"
+    assert resp.data["usuarios"] == 1
+
+
+def test_analizar_rechaza_remoto(api_admin: ClienteApi, tmp_path: Path):
+    archivo = _volcado_en(tmp_path)
+    resp = api_admin.post(
+        ANALIZAR_URL, {"ruta_archivo": str(archivo)}, REMOTE_ADDR="192.168.1.150", HTTP_IDEMPOTENCY_KEY="k-analizar-2"
+    )
+    assert resp.status_code == 403
+
+
+def test_analizar_requiere_admin(api_usuario: ClienteApi, tmp_path: Path):
+    archivo = _volcado_en(tmp_path)
+    resp = api_usuario.post(
+        ANALIZAR_URL, {"ruta_archivo": str(archivo)}, REMOTE_ADDR="127.0.0.1", HTTP_IDEMPOTENCY_KEY="k-analizar-3"
+    )
+    assert resp.status_code == 403
+
+
+@patch("apps.comun.servicios_respaldo.subprocess.Popen")
+def test_restaurar_rechaza_invalido_sin_lanzar(mock_popen: MagicMock, api_admin: ClienteApi, tmp_path: Path):
+    archivo = _volcado_en(tmp_path, completo=False)
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo)},
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_IDEMPOTENCY_KEY="k-restaurar-invalido",
+    )
+    assert resp.status_code == 422
+    assert not mock_popen.called
+    assert not ARCHIVO_ESTADO_RESPALDO.exists() or _estado()["ejecutando"] is False
+
+
+@patch("apps.comun.servicios_respaldo.subprocess.Popen")
+def test_restaurar_sin_usuarios_pasa_flag(mock_popen: MagicMock, api_admin: ClienteApi, tmp_path: Path):
+    archivo = _volcado_en(tmp_path)
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo), "importar_usuarios": False},
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_IDEMPOTENCY_KEY="k-restaurar-sin-usuarios",
+    )
+    assert resp.status_code == 202
+    assert "--sin-usuarios" in mock_popen.call_args[0][0]
+
+
+@patch("apps.comun.servicios_respaldo.subprocess.Popen")
+def test_restaurar_con_usuarios_por_defecto_no_pasa_flag(mock_popen: MagicMock, api_admin: ClienteApi, tmp_path: Path):
+    archivo = _volcado_en(tmp_path)
+    resp = api_admin.post(
+        RESTAURAR_URL,
+        {"ruta_archivo": str(archivo)},
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_IDEMPOTENCY_KEY="k-restaurar-con-usuarios",
+    )
+    assert resp.status_code == 202
+    assert "--sin-usuarios" not in mock_popen.call_args[0][0]
+
+
+def test_estado_expone_progreso(api_admin: ClienteApi):
+    ARCHIVO_ESTADO_RESPALDO.parent.mkdir(parents=True, exist_ok=True)
+    ARCHIVO_ESTADO_RESPALDO.write_text(
+        json.dumps({"ejecutando": False, "etapa": "importando", "tabla_actual": "marca", "avance": 2, "total": 10}),
+        encoding="utf-8",
+    )
+    resp = api_admin.get(ESTADO_URL, REMOTE_ADDR="127.0.0.1")
+    assert resp.data["progreso"] == {"etapa": "importando", "tabla_actual": "marca", "avance": 2, "total": 10}
+
+
+def test_estado_sin_progreso_es_nulo(api_admin: ClienteApi):
+    resp = api_admin.get(ESTADO_URL, REMOTE_ADDR="127.0.0.1")
+    assert resp.data["progreso"] is None
+
+
+def test_subir_no_sobrescribe(api_admin: ClienteApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from apps.comun import servicios_respaldo
+
+    monkeypatch.setattr(servicios_respaldo, "obtener_ruta_respaldo", lambda: tmp_path)
+    nombres = []
+    for contenido in (b"uno", b"dos"):
+        archivo = SimpleUploadedFile("a.sql", contenido, content_type="application/sql")
+        resp = api_admin.post(SUBIR_URL, {"archivo": archivo}, format="multipart", REMOTE_ADDR="127.0.0.1")
+        assert resp.status_code == 201
+        nombres.append(resp.data["archivo"])
+    assert nombres == ["a.sql", "a-1.sql"]
+    assert (tmp_path / "a.sql").read_bytes() == b"uno"
+    assert (tmp_path / "a-1.sql").read_bytes() == b"dos"

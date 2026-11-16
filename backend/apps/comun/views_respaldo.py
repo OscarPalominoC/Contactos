@@ -14,6 +14,8 @@ from rest_framework.views import APIView
 
 from apps.comun.excepciones import DatosInvalidos, PermisoDenegado
 from apps.comun.serializers_respaldo import (
+    AnalisisDumpRequestSerializer,
+    AnalisisDumpResponseSerializer,
     EsServidorResponseSerializer,
     ExploracionRutaResponseSerializer,
     RespaldoEjecucionResponseSerializer,
@@ -27,6 +29,7 @@ from apps.comun.serializers_respaldo import (
     SubirRespaldoResponseSerializer,
 )
 from apps.comun.servicios_respaldo import (
+    analizar_respaldo_servidor,
     ejecutar_respaldo_consola,
     ejecutar_restauracion_consola,
     es_cliente_servidor_local,
@@ -202,6 +205,30 @@ class VistaExplorarArchivosRespaldo(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class VistaAnalizarRespaldo(IdempotenciaMixin, APIView):
+    """Analiza un archivo .sql del servidor antes de restaurarlo. Solo desde el equipo servidor."""
+
+    permission_classes = [CambioClaveCompletado, SoloAdministrador]
+
+    @extend_schema(
+        summary="Analizar un respaldo antes de restaurar",
+        description="Clasifica el volcado y valida su estructura sin modificar la base de datos.",
+        tags=["Respaldos"],
+        request=AnalisisDumpRequestSerializer,
+        responses={200: AnalisisDumpResponseSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        if not es_cliente_servidor_local(request._request):
+            raise PermisoDenegado(
+                "El análisis de respaldos solo puede solicitarse directamente desde el equipo servidor."
+            )
+
+        datos = AnalisisDumpRequestSerializer(data=request.data)
+        datos.is_valid(raise_exception=True)
+        informe = analizar_respaldo_servidor(datos.validated_data["ruta_archivo"])
+        return Response(AnalisisDumpResponseSerializer(informe).data, status=status.HTTP_200_OK)
+
+
 class VistaRestaurarRespaldo(IdempotenciaMixin, APIView):
     """Ejecuta la restauración de la base de datos desde un archivo SQL. Restringido al equipo servidor."""
 
@@ -224,7 +251,7 @@ class VistaRestaurarRespaldo(IdempotenciaMixin, APIView):
         datos.is_valid(raise_exception=True)
         ruta_archivo = datos.validated_data["ruta_archivo"]
 
-        resultado = ejecutar_restauracion_consola(ruta_archivo)
+        resultado = ejecutar_restauracion_consola(ruta_archivo, datos.validated_data["importar_usuarios"])
         serializer = RestaurarRespaldoResponseSerializer(resultado)
         return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
 

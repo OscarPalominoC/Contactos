@@ -16,6 +16,8 @@ from django.conf import settings
 from django.http import HttpRequest
 from django.utils import timezone
 
+from apps.comun.analisis_dump import analizar_dump
+
 logger = logging.getLogger(__name__)
 
 RUTA_DEFAULT_RESPALDOS = settings.BASE_DIR.parent / "respaldos"
@@ -284,6 +286,18 @@ def escribir_estado_ejecucion(datos: dict[str, Any]) -> None:
     ARCHIVO_ESTADO_RESPALDO.write_text(json.dumps(datos, indent=2), encoding="utf-8")
 
 
+def _progreso_de_estado(estado: dict[str, Any]) -> dict[str, Any] | None:
+    """Extrae el avance de una restauración del archivo de estado, o None si no hay etapa registrada."""
+    if not estado.get("etapa"):
+        return None
+    return {
+        "etapa": estado["etapa"],
+        "tabla_actual": estado.get("tabla_actual"),
+        "avance": estado.get("avance"),
+        "total": estado.get("total"),
+    }
+
+
 def obtener_estado_respaldo(request: HttpRequest | None = None) -> dict[str, Any]:
     """Compila el estado consolidado de la funcionalidad de respaldos."""
     ruta = obtener_ruta_respaldo()
@@ -299,6 +313,7 @@ def obtener_estado_respaldo(request: HttpRequest | None = None) -> dict[str, Any
         "ultimo_respaldo": ultimo,
         "total_respaldos": total,
         "ultimo_resultado": estado_ejecucion.get("mensaje") or estado_ejecucion.get("error"),
+        "progreso": _progreso_de_estado(estado_ejecucion),
     }
 
 
@@ -504,6 +519,37 @@ def explorar_directorio_servidor(ruta_str: str | None = None) -> dict[str, Any]:
     }
 
 
+def analizar_respaldo_servidor(ruta_archivo_str: str) -> dict[str, Any]:
+    """Analiza (sin modificar nada) un volcado ubicado en el servidor y devuelve el informe serializable."""
+    from apps.comun.excepciones import DatosInvalidos
+    from apps.comun.management.commands.importar_legado import TABLAS
+
+    limpio = (ruta_archivo_str or "").strip()
+    if not es_ruta_absoluta(limpio):
+        raise DatosInvalidos(f"La ruta '{limpio}' debe ser absoluta (ej: F:\\Prueba\\respaldo.sql).")
+    ruta = resolver_ruta_sistema(limpio)
+    if not ruta.is_file():
+        raise DatosInvalidos(f"El archivo '{limpio}' no existe en el disco del servidor.")
+    if not ruta.name.lower().endswith(".sql"):
+        raise DatosInvalidos("El archivo a analizar debe tener extensión .sql")
+
+    informe = analizar_dump(ruta)
+    return {
+        "tipo": informe.tipo,
+        "valido": informe.valido,
+        "completo": informe.completo,
+        "errores": informe.errores,
+        "advertencias": informe.advertencias,
+        "usuarios": informe.usuarios,
+        "usuarios_admin": informe.usuarios_admin,
+        "tablas_importables": [
+            {"nombre": t.legada, "filas_aprox": informe.tablas[t.legada].filas_aprox}
+            for t in TABLAS
+            if t.legada in informe.tablas
+        ],
+    }
+
+
 def guardar_archivo_respaldo_subido(archivo: Any) -> dict[str, Any]:
     """Guarda un archivo de respaldo .sql subido en la carpeta configurada del servidor."""
     nombre = getattr(archivo, "name", "")
@@ -516,10 +562,19 @@ def guardar_archivo_respaldo_subido(archivo: Any) -> dict[str, Any]:
     destino_dir.mkdir(parents=True, exist_ok=True)
     nombre_seguro = re.sub(r"[^\w\s\-\.]", "_", Path(nombre).name)
     ruta_destino = destino_dir / nombre_seguro
-
-    with open(ruta_destino, "wb") as f_dest:
-        for chunk in archivo.chunks():
-            f_dest.write(chunk)
+    base = Path(nombre_seguro)
+    consecutivo = 0
+    while True:
+        try:
+            # Modo "xb": falla si existe, así nunca se sobrescribe un respaldo previo.
+            with open(ruta_destino, "xb") as f_dest:
+                for chunk in archivo.chunks():
+                    f_dest.write(chunk)
+            break
+        except FileExistsError:
+            consecutivo += 1
+            nombre_seguro = f"{base.stem}-{consecutivo}{base.suffix}"
+            ruta_destino = destino_dir / nombre_seguro
 
     stat = ruta_destino.stat()
     return {
@@ -530,7 +585,7 @@ def guardar_archivo_respaldo_subido(archivo: Any) -> dict[str, Any]:
     }
 
 
-def ejecutar_restauracion_consola(ruta_archivo_str: str) -> dict[str, Any]:
+def ejecutar_restauracion_consola(ruta_archivo_str: str, importar_usuarios: bool = True) -> dict[str, Any]:
     """Lanza la restauración de la base de datos como subproceso de consola en el servidor."""
     estado = leer_estado_ejecucion()
     if estado.get("ejecutando"):
@@ -565,6 +620,12 @@ def ejecutar_restauracion_consola(ruta_archivo_str: str) -> dict[str, Any]:
 
         raise DatosInvalidos("El archivo a restaurar debe tener extensión .sql")
 
+    informe = analizar_dump(ruta_archivo)
+    if not informe.valido:
+        from apps.comun.excepciones import DatosInvalidos
+
+        raise DatosInvalidos(" ".join(informe.errores))
+
     ahora = timezone.now()
     nuevo_estado = {
         "ejecutando": True,
@@ -582,6 +643,8 @@ def ejecutar_restauracion_consola(ruta_archivo_str: str) -> dict[str, Any]:
         "--origen",
         str(ruta_archivo),
     ]
+    if not importar_usuarios:
+        comando.append("--sin-usuarios")
 
     log_consola = settings.BASE_DIR.parent / "logs" / "restauracion_consola.log"
     log_consola.parent.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,7 @@ from django.urls import include, path
 from rest_framework.routers import SimpleRouter
 
 from apps.comun.views_respaldo import (
+    VistaAnalizarRespaldo,
     VistaConfigurarRutaRespaldo,
     VistaEjecutarRespaldo,
     VistaEsServidor,
@@ -40,6 +41,7 @@ urlpatterns = [
     path("respaldos/configurar-ruta", VistaConfigurarRutaRespaldo.as_view(), name="respaldos-configurar-ruta"),
     path("respaldos/ejecutar", VistaEjecutarRespaldo.as_view(), name="respaldos-ejecutar"),
     path("respaldos/explorar", VistaExplorarArchivosRespaldo.as_view(), name="respaldos-explorar"),
+    path("respaldos/analizar", VistaAnalizarRespaldo.as_view(), name="respaldos-analizar"),
     path("respaldos/restaurar", VistaRestaurarRespaldo.as_view(), name="respaldos-restaurar"),
     path("respaldos/subir", VistaSubirRespaldo.as_view(), name="respaldos-subir"),
     *router.urls,

@@ -53,6 +53,15 @@ class EsServidorResponseSerializer(serializers.Serializer):
     es_servidor = serializers.BooleanField(help_text="True si la petición se realiza desde el equipo servidor.")
 
 
+class ProgresoRespaldoSerializer(serializers.Serializer):
+    """Avance de una restauración en curso o finalizada."""
+
+    etapa = serializers.CharField(help_text="Etapa actual: analizando, respaldo_previo, importando o finalizado.")
+    tabla_actual = serializers.CharField(allow_null=True, required=False, help_text="Tabla que se está importando.")
+    avance = serializers.IntegerField(allow_null=True, required=False, help_text="Tablas procesadas hasta ahora.")
+    total = serializers.IntegerField(allow_null=True, required=False, help_text="Total de tablas a procesar.")
+
+
 class RespaldoEstadoResponseSerializer(serializers.Serializer):
     """Estado general del subsistema de respaldos."""
 
@@ -71,6 +80,11 @@ class RespaldoEstadoResponseSerializer(serializers.Serializer):
         allow_null=True,
         required=False,
         help_text="Mensaje del último resultado de ejecución.",
+    )
+    progreso = ProgresoRespaldoSerializer(
+        allow_null=True,
+        required=False,
+        help_text="Avance de la última restauración, o null si no hay etapa registrada.",
     )
 
 
@@ -118,6 +132,39 @@ class RestaurarRespaldoRequestSerializer(serializers.Serializer):
         required=True,
         help_text="Ruta absoluta en el disco del servidor al archivo .sql que se desea restaurar.",
     )
+    importar_usuarios = serializers.BooleanField(
+        default=True,
+        help_text="Si es false, no se importan las cuentas de usuario del sistema anterior.",
+    )
+
+
+class AnalisisDumpRequestSerializer(serializers.Serializer):
+    """Solicitud para analizar un archivo .sql antes de restaurarlo."""
+
+    ruta_archivo = serializers.CharField(
+        max_length=500,
+        help_text="Ruta absoluta en el disco del servidor al archivo .sql que se desea analizar.",
+    )
+
+
+class TablaImportableSerializer(serializers.Serializer):
+    """Tabla del volcado que se puede importar."""
+
+    nombre = serializers.CharField(help_text="Nombre de la tabla en el volcado.")
+    filas_aprox = serializers.IntegerField(help_text="Filas aproximadas contadas en los INSERT.")
+
+
+class AnalisisDumpResponseSerializer(serializers.Serializer):
+    """Informe del análisis previo de un volcado SQL."""
+
+    tipo = serializers.CharField(help_text="mysql_legado, postgres_check o desconocido.")
+    valido = serializers.BooleanField(help_text="True si el volcado puede restaurarse.")
+    completo = serializers.BooleanField(help_text="True si el volcado termina con su marca final.")
+    errores = serializers.ListField(child=serializers.CharField(), help_text="Motivos que impiden restaurar.")
+    advertencias = serializers.ListField(child=serializers.CharField(), help_text="Avisos que no impiden restaurar.")
+    usuarios = serializers.IntegerField(help_text="Cuentas de usuario encontradas en el volcado legado.")
+    usuarios_admin = serializers.IntegerField(help_text="Cuentas con rol administrador en el volcado legado.")
+    tablas_importables = TablaImportableSerializer(many=True, help_text="Tablas presentes, en orden de importación.")
 
 
 class RestaurarRespaldoResponseSerializer(serializers.Serializer):
