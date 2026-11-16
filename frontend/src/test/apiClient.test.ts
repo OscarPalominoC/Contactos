@@ -1,7 +1,7 @@
-import axios from "axios";
+import axios, { type InternalAxiosRequestConfig } from "axios";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, crearCliente, esCancelacion, normalizarError, nuevoId } from "../services/apiClient";
+import { ApiError, crearCliente, esCancelacion, esSesionExpirada, normalizarError, nuevoId, refrescarSesion } from "../services/apiClient";
 import { tokenStore } from "../services/tokenStore";
 
 interface Llamada {
@@ -15,7 +15,7 @@ interface Llamada {
 function adaptador(respuestas: ((llamada: Llamada) => { status: number; data?: unknown })[]) {
   const llamadas: Llamada[] = [];
   let indice = 0;
-  const adapter = async (config: any) => {
+  const adapter = async (config: InternalAxiosRequestConfig) => {
     const llamada: Llamada = {
       url: String(config.url),
       method: String(config.method),
@@ -77,7 +77,7 @@ describe("cliente HTTP", () => {
 
   it("refresca una sola vez ante varios 401 simultáneos y reintenta en cola", async () => {
     let refrescos = 0;
-    const adapter = async (config: any) => {
+    const adapter = async (config: InternalAxiosRequestConfig) => {
       const url = String(config.url);
       const headers = (config.headers ?? {}) as Record<string, string>;
       if (url === "/auth/refresh") {
@@ -107,7 +107,7 @@ describe("cliente HTTP", () => {
 
   it("si el refresco falla limpia el token y avisa que la sesión expiró", async () => {
     const alExpirarSesion = vi.fn();
-    const adapter = async (config: any) => {
+    const adapter = async (config: InternalAxiosRequestConfig) => {
       throw new axios.AxiosError("401", "401", config as never, null, {
         status: 401,
         data: {},
@@ -124,6 +124,61 @@ describe("cliente HTTP", () => {
     expect(alExpirarSesion).toHaveBeenCalledOnce();
   });
 
+  it("dos refrescos concurrentes hacen un solo POST /auth/refresh", async () => {
+    const { adapter, llamadas } = adaptador([() => ({ status: 200, data: { access: "t-unico", expira_en: 300 } })]);
+    const cliente = crearCliente();
+    cliente.defaults.adapter = adapter;
+    const [a, b] = await Promise.all([refrescarSesion(cliente), refrescarSesion(cliente)]);
+    expect(a).toBe("t-unico");
+    expect(b).toBe("t-unico");
+    expect(llamadas.filter((l) => l.url === "/auth/refresh")).toHaveLength(1);
+  });
+
+  it("no expira la sesión ante error de red en refresh", async () => {
+    const alExpirarSesion = vi.fn();
+    const adapter = async (config: InternalAxiosRequestConfig) => {
+      if (String(config.url) === "/auth/refresh") throw new axios.AxiosError("sin red", "ERR_NETWORK", config as never);
+      throw new axios.AxiosError("401", "401", config as never, null, { status: 401, data: {}, config, headers: {}, statusText: "" } as never);
+    };
+    const cliente = crearCliente({ alExpirarSesion });
+    cliente.defaults.adapter = adapter;
+    tokenStore.set("token-viejo");
+    await expect(cliente.get("/contactos")).rejects.toBeInstanceOf(ApiError);
+    expect(alExpirarSesion).not.toHaveBeenCalled();
+    expect(tokenStore.get()).toBe("token-viejo");
+  });
+
+  it("no expira la sesión ante 5xx en refresh", async () => {
+    const alExpirarSesion = vi.fn();
+    const cliente = crearCliente({ alExpirarSesion });
+    cliente.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const status = String(config.url) === "/auth/refresh" ? 503 : 401;
+      throw new axios.AxiosError(String(status), String(status), config as never, null, { status, data: {}, config, headers: {}, statusText: "" } as never);
+    };
+    await expect(cliente.get("/contactos")).rejects.toBeInstanceOf(ApiError);
+    expect(alExpirarSesion).not.toHaveBeenCalled();
+  });
+
+  it("expira la sesión con 401 en refresh", async () => {
+    const alExpirarSesion = vi.fn();
+    const { adapter } = adaptador([() => ({ status: 401 })]);
+    const cliente = crearCliente({ alExpirarSesion });
+    cliente.defaults.adapter = adapter;
+    tokenStore.set("token-viejo");
+    await expect(cliente.get("/contactos")).rejects.toBeInstanceOf(ApiError);
+    expect(alExpirarSesion).toHaveBeenCalledOnce();
+    expect(tokenStore.get()).toBeNull();
+  });
+
+  it("esSesionExpirada solo es verdadero para 401 y 403", () => {
+    const err = (status: number) => new ApiError({ type: "x", title: "t", status, detail: "d" });
+    expect(esSesionExpirada(err(401))).toBe(true);
+    expect(esSesionExpirada(err(403))).toBe(true);
+    expect(esSesionExpirada(err(0))).toBe(false);
+    expect(esSesionExpirada(err(500))).toBe(false);
+    expect(esSesionExpirada(new Error("x"))).toBe(false);
+  });
+
   it("no intenta refrescar cuando el 401 viene del propio login", async () => {
     const { adapter, llamadas } = adaptador([() => ({ status: 401, data: { detail: "Credenciales inválidas." } })]);
     const cliente = crearCliente();
@@ -134,7 +189,7 @@ describe("cliente HTTP", () => {
 
   it("sí intenta refrescar cuando el 401 viene de /auth/yo", async () => {
     let llamadoRefresh = false;
-    const adapter = async (config: any) => {
+    const adapter = async (config: InternalAxiosRequestConfig) => {
       const url = String(config.url);
       if (url === "/auth/refresh") {
         llamadoRefresh = true;
@@ -183,7 +238,7 @@ describe("cliente HTTP", () => {
 
   it("las cancelaciones no se convierten en ApiError", async () => {
     const controlador = new AbortController();
-    const adapter = async (config: any) => {
+    const adapter = async (config: InternalAxiosRequestConfig) => {
       controlador.abort();
       throw new axios.CanceledError("cancelado", undefined, config as never);
     };

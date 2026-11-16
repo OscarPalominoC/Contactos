@@ -25,10 +25,16 @@ const ENLACES: Enlace[] = [
   { a: "/usuarios", texto: "Usuarios", permiso: "cuentas.view_usuario" },
 ];
 
-const INACTIVIDAD_MS = 30 * 60 * 1000;
 const AVISO_MS = 60 * 1000;
+const INTERVALO_MIN_ACTIVIDAD_MS = 5 * 1000;
 
-/** Cierra la sesión por inactividad avisando 60 s antes, con opción de prorrogar (WCAG 2.2.1). */
+/** Minutos de inactividad configurados; 0 (por defecto) desactiva el cierre automático. */
+function inactividadMs(): number {
+  const minutos = Number(import.meta.env.VITE_INACTIVIDAD_MINUTOS ?? 0);
+  return Number.isFinite(minutos) && minutos > 0 ? minutos * 60_000 : 0;
+}
+
+/** Cierra la sesión por inactividad avisando 60 s antes, con opción de prorrogar (WCAG 2.2.1). Desactivado por defecto. */
 function useInactividad(alExpirar: () => void) {
   const [aviso, setAviso] = useState(false);
   const temporizadores = useRef<number[]>([]);
@@ -38,24 +44,32 @@ function useInactividad(alExpirar: () => void) {
   expirar.current = alExpirar;
 
   useEffect(() => {
+    const total = inactividadMs();
+    if (total === 0) return;
     const limpiar = () => temporizadores.current.forEach((t) => window.clearTimeout(t));
+    let ultimoReinicio = Date.now();
     reiniciar.current = () => {
       limpiar();
       setAviso(false);
+      ultimoReinicio = Date.now();
       temporizadores.current = [
-        window.setTimeout(() => setAviso(true), INACTIVIDAD_MS - AVISO_MS),
-        window.setTimeout(() => expirar.current(), INACTIVIDAD_MS),
+        window.setTimeout(() => setAviso(true), Math.max(total - AVISO_MS, 0)),
+        window.setTimeout(() => expirar.current(), total),
       ];
     };
     reiniciar.current();
-    const actividad = () => {
-      if (!document.querySelector("[data-aviso-inactividad]")) reiniciar.current();
+    const actividad = (evento: Event) => {
+      if (document.querySelector("[data-aviso-inactividad]")) return;
+      // Eventos continuos (rueda, desplazamiento, ratón) se limitan para no reprogramar temporizadores sin parar.
+      const continuo = evento.type === "wheel" || evento.type === "scroll" || evento.type === "mousemove";
+      if (continuo && Date.now() - ultimoReinicio < INTERVALO_MIN_ACTIVIDAD_MS) return;
+      reiniciar.current();
     };
-    const eventos = ["keydown", "pointerdown"] as const;
-    eventos.forEach((e) => window.addEventListener(e, actividad));
+    const eventos = ["keydown", "pointerdown", "wheel", "scroll", "mousemove"] as const;
+    eventos.forEach((e) => window.addEventListener(e, actividad, { passive: true, capture: e === "scroll" }));
     return () => {
       limpiar();
-      eventos.forEach((e) => window.removeEventListener(e, actividad));
+      eventos.forEach((e) => window.removeEventListener(e, actividad, { capture: e === "scroll" }));
     };
   }, []);
 

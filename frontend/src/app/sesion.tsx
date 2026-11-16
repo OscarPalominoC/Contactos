@@ -1,9 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { alExpirarSesion, apiClient, asegurarCsrf, refrescarSesion } from "../services/apiClient";
+import { alExpirarSesion, apiClient, asegurarCsrf, esSesionExpirada, refrescarSesion } from "../services/apiClient";
 import { accesoSchema, yoSchema, type Yo } from "../services/esquemas";
 import { tokenStore } from "../services/tokenStore";
+
+const REINTENTO_ARRANQUE_MS = 15 * 1000;
+const RENOVACION_MIN_MS = 60 * 1000;
 
 export type EstadoSesion = "cargando" | "anonimo" | "autenticado";
 
@@ -28,6 +31,7 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
   const [estado, setEstado] = useState<EstadoSesion>("cargando");
   const [usuario, setUsuario] = useState<Yo | null>(null);
   const queryClient = useQueryClient();
+  const ultimaRenovacion = useRef(0);
 
   const limpiar = useCallback(() => {
     tokenStore.clear();
@@ -51,14 +55,54 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
   useEffect(() => {
     alExpirarSesion(limpiar);
     let activo = true;
+    let enCurso = false;
+    let resuelto = false;
+
+    const reintento = setInterval(() => void intentar(), REINTENTO_ARRANQUE_MS);
+    const detener = () => {
+      clearInterval(reintento);
+      window.removeEventListener("focus", intentar);
+      window.removeEventListener("online", intentar);
+      document.removeEventListener("visibilitychange", alVolverVisible);
+    };
+
     // Al abrir la aplicación se intenta recuperar la sesión con la cookie HttpOnly de refresco.
-    refrescarSesion(apiClient)
-      .then(() => (activo ? recargar() : null))
-      .catch(() => activo && limpiar());
+    // Solo un 401/403 significa sesión vencida; con red caída o 5xx se sigue en "cargando" y se reintenta.
+    async function intentar(): Promise<void> {
+      if (!activo || resuelto || enCurso) return;
+      enCurso = true;
+      try {
+        await refrescarSesion(apiClient);
+        ultimaRenovacion.current = Date.now();
+        const yo = await cargarYo();
+        if (!activo) return;
+        resuelto = true;
+        detener();
+        setUsuario(yo);
+        setEstado("autenticado");
+      } catch (error) {
+        if (activo && esSesionExpirada(error)) {
+          resuelto = true;
+          detener();
+          limpiar();
+        }
+      } finally {
+        enCurso = false;
+      }
+    }
+    function alVolverVisible(): void {
+      if (document.visibilityState === "visible") void intentar();
+    }
+
+    void intentar();
+    window.addEventListener("focus", intentar);
+    window.addEventListener("online", intentar);
+    document.addEventListener("visibilitychange", alVolverVisible);
     return () => {
       activo = false;
+      detener();
     };
-  }, [limpiar, recargar]);
+  }, [limpiar]);
 
   // Mantenimiento proactivo de la sesión: renueva el token silenciosamente cada 4 min (antes de que venza
   // el access token de 5 min) y al reactivar la pestaña, evitando cierres de sesión inesperados.
@@ -66,10 +110,14 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
     if (estado !== "autenticado") return;
 
     const renovarSilencioso = async () => {
+      // focus y visibilitychange suelen dispararse juntos: se omite si hubo una renovación hace menos de 60 s.
+      if (Date.now() - ultimaRenovacion.current < RENOVACION_MIN_MS) return;
       try {
         await refrescarSesion(apiClient);
-      } catch {
-        // En caso de fallo definitivo el cliente HTTP limpiará la sesión
+        ultimaRenovacion.current = Date.now();
+      } catch (error) {
+        // Red caída o 5xx: se conserva la sesión y se reintenta luego; solo 401/403 la cierra.
+        if (esSesionExpirada(error)) limpiar();
       }
     };
 
@@ -88,7 +136,7 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", alCambiarVisibilidad);
       window.removeEventListener("focus", renovarSilencioso);
     };
-  }, [estado]);
+  }, [estado, limpiar]);
 
   const iniciar = useCallback(async (nip: string, password: string): Promise<Yo> => {
     await asegurarCsrf(apiClient);

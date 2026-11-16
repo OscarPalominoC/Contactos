@@ -1,17 +1,21 @@
-import { screen, waitFor } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes } from "react-router-dom";
+import axios, { type InternalAxiosRequestConfig } from "axios";
+import { StrictMode } from "react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RutaCambioClave, RutaProtegida } from "../app/RutaProtegida";
-import { useSesion } from "../app/sesion";
+import { ProveedorSesion, useSesion } from "../app/sesion";
 import { PaginaCambioClave } from "../features/auth/PaginaCambioClave";
 import { PaginaLogin } from "../features/auth/PaginaLogin";
 import { PaginaMiCuenta } from "../features/auth/PaginaMiCuenta";
-import { ApiError } from "../services/apiClient";
+import { ApiError, crearCliente } from "../services/apiClient";
 import { tokenStore } from "../services/tokenStore";
-import { renderizarConSesion, YO_ADMIN } from "./utilidades";
+import { clientePruebas, renderizarConSesion, YO_ADMIN } from "./utilidades";
 
+const refresco = vi.hoisted(() => ({ real: null as null | (() => Promise<string>) }));
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 
 vi.mock("../services/apiClient", async (original) => {
@@ -21,6 +25,7 @@ vi.mock("../services/apiClient", async (original) => {
     apiClient: api,
     asegurarCsrf: vi.fn(async () => undefined),
     refrescarSesion: vi.fn(async () => {
+      if (refresco.real) return refresco.real();
       const { data } = await api.post("/auth/refresh");
       tokenStore.set(data.access);
       return data.access as string;
@@ -76,6 +81,7 @@ beforeEach(() => {
   api.get.mockReset();
   api.post.mockReset();
   tokenStore.clear();
+  refresco.real = null;
 });
 
 describe("sesión y rutas protegidas", () => {
@@ -193,5 +199,55 @@ describe("sesión y rutas protegidas", () => {
     await waitFor(() => expect(screen.getByText("estado:anonimo")).toBeInTheDocument());
     expect(tokenStore.get()).toBeNull();
     expect(api.post).toHaveBeenLastCalledWith("/auth/logout");
+  });
+
+  it("arranque en StrictMode no cierra la sesión", async () => {
+    // Primer refresh 200, segundo 401 (la cookie rota): con single-flight solo se hace uno.
+    const real = await vi.importActual<typeof import("../services/apiClient")>("../services/apiClient");
+    let posts = 0;
+    const cliente = crearCliente();
+    cliente.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (String(config.url) === "/auth/refresh") {
+        posts += 1;
+        if (posts > 1) {
+          throw new axios.AxiosError("401", "401", config as never, null, { status: 401, data: {}, config, headers: {}, statusText: "" } as never);
+        }
+        return { status: 200, data: { access: "t1", expira_en: 300 }, config, headers: {}, statusText: "" } as never;
+      }
+      return { status: 200, data: {}, config, headers: {}, statusText: "" } as never;
+    };
+    document.cookie = "XSRF-TOKEN=token-csrf; path=/";
+    refresco.real = () => real.refrescarSesion(cliente);
+    api.get.mockResolvedValue({ data: YO_ADMIN });
+    function Estado() {
+      return <p>estado:{useSesion().estado}</p>;
+    }
+    render(
+      <StrictMode>
+        <QueryClientProvider client={clientePruebas()}>
+          <MemoryRouter>
+            <ProveedorSesion>
+              <Estado />
+            </ProveedorSesion>
+          </MemoryRouter>
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+    expect(await screen.findByText("estado:autenticado")).toBeInTheDocument();
+    expect(posts).toBe(1);
+  });
+
+  it("ante error de red en el arranque sigue cargando y reintenta hasta recuperar la sesión", async () => {
+    const red = new ApiError({ type: "/problemas/red", title: "Sin conexión", status: 0, detail: "sin red" });
+    api.post.mockRejectedValueOnce(red).mockResolvedValueOnce({ data: { access: "t1", expira_en: 300 } });
+    api.get.mockResolvedValueOnce({ data: YO_ADMIN });
+    function Estado() {
+      return <p>estado:{useSesion().estado}</p>;
+    }
+    renderizarConSesion(<Estado />);
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("estado:cargando")).toBeInTheDocument();
+    window.dispatchEvent(new Event("online"));
+    expect(await screen.findByText("estado:autenticado")).toBeInTheDocument();
   });
 });

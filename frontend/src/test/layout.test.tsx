@@ -41,7 +41,10 @@ describe("AppLayout", () => {
     sesion.permisos = ["contactos.view_contacto"];
     useUi.setState({ tema: "claro", menuAbierto: false });
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
 
   it("muestra solo los enlaces permitidos, enlace de salto y nombre del usuario", () => {
     conLayout();
@@ -76,7 +79,32 @@ describe("AppLayout", () => {
     expect(sesion.cerrar).toHaveBeenCalledOnce();
   });
 
+  it("sin VITE_INACTIVIDAD_MINUTOS no cierra sesión tras 31 min", () => {
+    vi.useFakeTimers();
+    conLayout();
+    act(() => {
+      vi.advanceTimersByTime(31 * 60 * 1000);
+    });
+    expect(sesion.cerrar).not.toHaveBeenCalled();
+    expect(screen.queryByText(/por inactividad/)).not.toBeInTheDocument();
+  });
+
+  it("con VITE_INACTIVIDAD_MINUTOS=1 avisa y cierra", () => {
+    vi.stubEnv("VITE_INACTIVIDAD_MINUTOS", "1");
+    vi.useFakeTimers();
+    conLayout();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("Su sesión se cerrará en 1 minuto por inactividad.")).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(60 * 1000);
+    });
+    expect(sesion.cerrar).toHaveBeenCalledOnce();
+  });
+
   it("avisa antes de cerrar por inactividad y permite prorrogar", async () => {
+    vi.stubEnv("VITE_INACTIVIDAD_MINUTOS", "30");
     vi.useFakeTimers();
     conLayout();
     act(() => {

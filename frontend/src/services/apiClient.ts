@@ -90,11 +90,6 @@ export function normalizarError(error: unknown): ApiError {
 
 type ReintentoConfig = InternalAxiosRequestConfig & { _reintento?: boolean };
 
-interface EnEspera {
-  resolver: (token: string) => void;
-  rechazar: (error: unknown) => void;
-}
-
 export interface OpcionesCliente {
   baseURL?: string;
   alExpirarSesion?: () => void;
@@ -103,7 +98,7 @@ export interface OpcionesCliente {
 /**
  * Cliente HTTP centralizado:
  * withCredentials + XSRF, Authorization desde tokenStore, X-Request-ID e Idempotency-Key,
- * refresco silencioso con cola (failedQueue), cancelación sin error y errores RFC 7807.
+ * refresco silencioso compartido (single-flight), cancelación sin error y errores RFC 7807.
  */
 export function crearCliente({ baseURL = "/api/v1", alExpirarSesion }: OpcionesCliente = {}): AxiosInstance {
   const cliente = axios.create({
@@ -114,17 +109,6 @@ export function crearCliente({ baseURL = "/api/v1", alExpirarSesion }: OpcionesC
     timeout: 30000,
     headers: { Accept: "application/json" },
   });
-
-  let refrescando = false;
-  let cola: EnEspera[] = [];
-
-  const vaciarCola = (error: unknown, token: string | null): void => {
-    for (const espera of cola) {
-      if (token) espera.resolver(token);
-      else espera.rechazar(error);
-    }
-    cola = [];
-  };
 
   cliente.interceptors.request.use((config) => {
     const token = tokenStore.get();
@@ -145,27 +129,21 @@ export function crearCliente({ baseURL = "/api/v1", alExpirarSesion }: OpcionesC
         original?.url && (original.url.includes("/auth/login") || original.url.includes("/auth/refresh")),
       );
       if (error.response?.status === 401 && original && !original._reintento && !esAuth) {
-        if (refrescando) {
-          return new Promise<string>((resolver, rechazar) => cola.push({ resolver, rechazar })).then((token) => {
-            original.headers.Authorization = `Bearer ${token}`;
-            return cliente(original);
-          });
-        }
         original._reintento = true;
-        refrescando = true;
+        // Single-flight: todas las peticiones con 401 comparten un único refresco y luego se reintentan.
+        let token: string;
         try {
-          const token = await refrescarSesion(cliente);
-          vaciarCola(null, token);
-          original.headers.Authorization = `Bearer ${token}`;
-          return await cliente(original);
+          token = await refrescarSesion(cliente);
         } catch (errorRefresco) {
-          vaciarCola(errorRefresco, null);
-          tokenStore.clear();
-          alExpirarSesion?.();
+          // Solo un 401/403 del refresco significa sesión vencida; red caída o 5xx no cierran la sesión.
+          if (esSesionExpirada(errorRefresco)) {
+            tokenStore.clear();
+            alExpirarSesion?.();
+          }
           return Promise.reject(normalizarError(error));
-        } finally {
-          refrescando = false;
         }
+        original.headers.Authorization = `Bearer ${token}`;
+        return cliente(original);
       }
       return Promise.reject(normalizarError(error));
     },
@@ -179,12 +157,38 @@ export interface RespuestaAcceso {
   expira_en: number;
 }
 
-/** Pide la cookie CSRF si falta y renueva el token de acceso con la cookie HttpOnly de refresco. */
-export async function refrescarSesion(cliente: AxiosInstance): Promise<string> {
+/** True solo si el refresco respondió 401 o 403 (sesión vencida); red caída o 5xx no cuentan. */
+export function esSesionExpirada(error: unknown): boolean {
+  const status = error instanceof ApiError ? error.status : axios.isAxiosError(error) ? error.response?.status : undefined;
+  return status === 401 || status === 403;
+}
+
+const NOMBRE_CERROJO = "check-contactos-refresh";
+let refrescoEnCurso: Promise<string> | null = null;
+
+async function renovarToken(cliente: AxiosInstance): Promise<string> {
   await asegurarCsrf(cliente);
   const { data } = await cliente.post<RespuestaAcceso>("/auth/refresh");
   tokenStore.set(data.access);
   return data.access;
+}
+
+/**
+ * Pide la cookie CSRF si falta y renueva el token de acceso con la cookie HttpOnly de refresco.
+ * Single-flight: una sola promesa en curso por pestaña; entre pestañas se serializa con navigator.locks
+ * (si existe), porque la cookie de refresco rota y un segundo uso de la anterior sería rechazado.
+ */
+export function refrescarSesion(cliente: AxiosInstance): Promise<string> {
+  if (refrescoEnCurso) return refrescoEnCurso;
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  const ejecucion: Promise<string> = locks
+    ? Promise.resolve(locks.request(NOMBRE_CERROJO, () => renovarToken(cliente)))
+    : renovarToken(cliente);
+  const compartida = ejecucion.finally(() => {
+    refrescoEnCurso = null;
+  });
+  refrescoEnCurso = compartida;
+  return compartida;
 }
 
 export async function asegurarCsrf(cliente: AxiosInstance): Promise<void> {
