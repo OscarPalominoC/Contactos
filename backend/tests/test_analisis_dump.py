@@ -100,3 +100,29 @@ def test_dump_real_es_valido() -> None:
     assert len(informe.tablas) == 62
     assert informe.usuarios == 23
     assert informe.usuarios_admin == 5
+
+
+def test_usuario_mal_estructurado_con_inserts_informa_sin_fallar(tmp_path: Path) -> None:
+    texto = (
+        volcado_mysql("", con_usuario=False)  # noqa: S608
+        + "CREATE TABLE `usuario` (\n  `nip` int,\n  `x` int\n) ENGINE=MyISAM;\n"
+        + "INSERT INTO `usuario` VALUES ('1','a'),('2','b');\n"
+    )
+    informe = analizar_dump(_escribir(tmp_path, texto))
+    assert not informe.valido
+    assert any("`usuario`" in e for e in informe.errores)
+
+
+@pytest.mark.parametrize(
+    "insert", ["INSERT INTO `usuario` VALUES ('1','a','b','administrador'", "INSERT INTO `usuario` VALUES ('1'"]
+)
+def test_insert_usuario_malformado_es_error(tmp_path: Path, insert: str) -> None:
+    informe = analizar_dump(_escribir(tmp_path, volcado_mysql(insert + "\n")))
+    assert not informe.valido
+
+
+@pytest.mark.parametrize("linea", ["CREATE TABLE `sin_cierre\n", "INSERT INTO `sin_cierre VALUES (1);\n"])
+def test_linea_sin_cierre_de_comilla_es_error(tmp_path: Path, linea: str) -> None:
+    informe = analizar_dump(_escribir(tmp_path, volcado_mysql(linea)))
+    assert not informe.valido
+    assert any("malformadas" in e for e in informe.errores)

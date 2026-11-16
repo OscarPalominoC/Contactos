@@ -42,15 +42,29 @@ class InformeDump:
         return not self.errores
 
 
-def _contar_usuarios(linea: bytes) -> tuple[int, int]:
-    """Cuenta filas y administradores de un INSERT de `usuario`; la columna 2 (`clave`) nunca se conserva."""
+def _contar_usuarios(linea: bytes) -> tuple[int, int] | None:
+    """Cuenta filas y administradores de un INSERT de `usuario`; la columna 2 (`clave`) nunca se conserva.
+
+    Devuelve None si la línea está malformada o sus filas no tienen las 4 columnas esperadas.
+    """
     texto = linea.decode("latin-1")
     total = admin = 0
-    for fila in _parsear_valores(texto, len(_INSERT_USUARIO)):
-        total += 1
-        if fila[3] == "administrador":
-            admin += 1
+    try:
+        for fila in _parsear_valores(texto, len(_INSERT_USUARIO)):
+            if len(fila) != len(COLUMNAS_USUARIO):
+                return None
+            total += 1
+            if fila[3] == "administrador":
+                admin += 1
+    except (ValueError, IndexError):
+        return None
     return total, admin
+
+
+def _nombre_tabla(linea: bytes) -> str | None:
+    """Nombre entre las primeras comillas invertidas de la línea; None si falta la de cierre."""
+    partes = linea.split(b"`", 2)
+    return partes[1].decode("latin-1") if len(partes) == 3 else None
 
 
 def analizar_dump(ruta: Path) -> InformeDump:
@@ -64,7 +78,8 @@ def analizar_dump(ruta: Path) -> InformeDump:
     ultima_linea = b""
     completo = False
     tiene_contacto_pg = tiene_usuario_pg = False
-    usuarios = admin = 0
+    usuarios = admin = malformadas = 0
+    usuario_ilegible = False
 
     with ruta.open("rb") as archivo:
         for numero, linea in enumerate(archivo):
@@ -78,18 +93,27 @@ def analizar_dump(ruta: Path) -> InformeDump:
                 elif linea.startswith(b")"):
                     en_create = False
             elif linea.startswith(_PREFIJO_CREATE):
-                nombre = linea.split(b"`")[1].decode("latin-1")
+                nombre = _nombre_tabla(linea)
+                if nombre is None:
+                    malformadas += 1
+                    continue
                 actual = tablas[nombre] = TablaDump(nombre, [], 0)
                 en_create = True
             elif linea.startswith(_PREFIJO_INSERT):
-                nombre = linea.split(b"`", 2)[1].decode("latin-1")
+                nombre = _nombre_tabla(linea)
+                if nombre is None:
+                    malformadas += 1
+                    continue
                 tabla = tablas.get(nombre)
                 if tabla is not None:
                     tabla.filas_aprox += linea.count(b"),(") + 1
                 if linea.startswith(_INSERT_USUARIO):
-                    total, administradores = _contar_usuarios(linea)
-                    usuarios += total
-                    admin += administradores
+                    conteo = _contar_usuarios(linea)
+                    if conteo is None:
+                        usuario_ilegible = True
+                    else:
+                        usuarios += conteo[0]
+                        admin += conteo[1]
             elif linea.startswith(b"-- Dump completed"):
                 completo = True
             elif linea.startswith(b"CREATE TABLE public.contactos_contacto"):
@@ -100,6 +124,10 @@ def analizar_dump(ruta: Path) -> InformeDump:
     if any(b"MySQL dump" in linea or b"MariaDB" in linea for linea in cabecera):
         informe = InformeDump("mysql_legado", completo, tablas, usuarios=usuarios, usuarios_admin=admin)
         _validar_mysql(informe, TABLAS)
+        if malformadas:
+            informe.errores.append(f"El volcado tiene {malformadas} líneas SQL malformadas.")
+        if usuario_ilegible and not any("`usuario`" in e for e in informe.errores):
+            informe.errores.append("No se pudieron leer las filas de la tabla `usuario`.")
         return informe
 
     if any(linea.strip() == b"-- PostgreSQL database dump" for linea in cabecera):
