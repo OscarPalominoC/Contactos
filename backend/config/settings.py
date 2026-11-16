@@ -100,6 +100,8 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 5}},
     {"NAME": "apps.cuentas.validadores.HistorialClavesValidator"},
 ]
+# Duración de la sesión en días; cada renovación (rotación del refresh) reinicia la ventana completa.
+SESION_DIAS: int = env.int("SESION_DIAS", default=30)
 CLAVE_TEMPORAL_INICIAL: str = env.str("CLAVE_TEMPORAL_INICIAL", default="CheckLTDA!")
 
 # django-axes: 5 intentos fallidos bloquean nip + IP durante 1 hora.
@@ -175,7 +177,7 @@ SIMPLE_JWT = {
     "ISSUER": env.str("JWT_ISSUER"),
     "AUDIENCE": env.str("JWT_AUDIENCE"),
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=5),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=SESION_DIAS),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,
@@ -216,7 +218,7 @@ CSRF_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SECURE = ENVIRONMENT != "local"
 SESSION_COOKIE_SECURE = ENVIRONMENT != "local"
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_AGE = 7 * 24 * 3600
+SESSION_COOKIE_AGE = SESION_DIAS * 24 * 3600
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"

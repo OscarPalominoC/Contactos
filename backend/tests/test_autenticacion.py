@@ -228,3 +228,26 @@ def test_login_con_clave_temporal_inicial_exitosa(api: ClienteApi, settings: Any
     yo = api.get("/api/v1/auth/yo", HTTP_AUTHORIZATION=f"Bearer {respuesta.data['access']}")
     assert yo.status_code == 200
     assert yo.data["debe_cambiar_clave"] is True
+
+
+def test_login_cookie_dura_sesion_dias(api: ClienteApi, admin_usuario: Usuario) -> None:
+    respuesta = iniciar(api)
+    assert respuesta.cookies[settings.REFRESH_COOKIE_NAME]["max-age"] == 2592000
+
+
+def test_refresh_renueva_vida_completa(api: ClienteApi, admin_usuario: Usuario) -> None:
+    iniciar(api)
+    nuevo = api.post(REFRESH, **csrf(api))
+    assert nuevo.status_code == 200
+    assert nuevo.cookies[settings.REFRESH_COOKIE_NAME]["max-age"] == 2592000
+
+
+def test_cambio_de_clave_sigue_revocando(api: ClienteApi, admin_usuario: Usuario) -> None:
+    acceso = iniciar(api).data["access"]
+    anterior = api.cookies[settings.REFRESH_COOKIE_NAME].value
+    cabecera = csrf(api)
+    auth = {"HTTP_AUTHORIZATION": f"Bearer {acceso}"}
+    cambio = api.post("/api/v1/auth/cambio-clave", {"clave_actual": CLAVE, "clave_nueva": "Otra-Clave-Muy-Larga-7"}, **auth)
+    assert cambio.status_code == 200
+    api.cookies[settings.REFRESH_COOKIE_NAME] = anterior  # el cambio emite una cookie nueva; se reusa la previa
+    assert api.post(REFRESH, **cabecera).status_code == 401
