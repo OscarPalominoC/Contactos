@@ -3,10 +3,15 @@ import type { ReactNode } from "react";
 
 import type { ApiError } from "../../services/apiClient";
 
-type Tipo = "exito" | "error" | "info";
+type Tipo = "exito" | "error" | "info" | "advertencia";
 
-const ICONOS = { exito: CheckCircle2, error: AlertTriangle, info: Info } as const;
-const CLASES = { exito: "insignia-exito", error: "insignia-alerta", info: "insignia-info" } as const;
+const ICONOS = { exito: CheckCircle2, error: AlertTriangle, info: Info, advertencia: AlertTriangle } as const;
+const CLASES = {
+  exito: "insignia-exito",
+  error: "insignia-alerta",
+  info: "insignia-info",
+  advertencia: "insignia-aviso",
+} as const;
 
 /** Mensaje de estado anunciado por lectores de pantalla (role=status / role=alert). */
 export function Aviso({ tipo = "info", children }: { tipo?: Tipo; children: ReactNode }) {

@@ -209,6 +209,26 @@ export const respaldoUltimoSchema = z.object({
 });
 export type RespaldoUltimo = z.infer<typeof respaldoUltimoSchema>;
 
+export const progresoSchema = z.object({
+  etapa: z.string(),
+  tabla_actual: z.string().nullable().optional(),
+  avance: z.number(),
+  total: z.number(),
+});
+export type Progreso = z.infer<typeof progresoSchema>;
+
+export const analisisDumpSchema = z.object({
+  tipo: z.enum(["mysql_legado", "postgres_check", "desconocido"]),
+  valido: z.boolean(),
+  completo: z.boolean(),
+  errores: z.array(z.string()),
+  advertencias: z.array(z.string()),
+  usuarios: z.number(),
+  usuarios_admin: z.number(),
+  tablas_importables: z.array(z.object({ nombre: z.string(), filas_aprox: z.number() })),
+});
+export type AnalisisDump = z.infer<typeof analisisDumpSchema>;
+
 export const respaldoEstadoSchema = z.object({
   es_servidor_local: z.boolean(),
   ruta_configurada: z.string(),
@@ -216,6 +236,7 @@ export const respaldoEstadoSchema = z.object({
   ultimo_respaldo: respaldoUltimoSchema.nullable().optional(),
   total_respaldos: z.number(),
   ultimo_resultado: z.string().nullable().optional(),
+  progreso: progresoSchema.nullable().optional(),
 });
 export type RespaldoEstado = z.infer<typeof respaldoEstadoSchema>;
 

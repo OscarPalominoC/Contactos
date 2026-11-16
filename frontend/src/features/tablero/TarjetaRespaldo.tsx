@@ -22,6 +22,7 @@ import { CampoTexto } from "../../components/ui/Campos";
 import { Dialogo } from "../../components/ui/Dialogo";
 import type { ApiError } from "../../services/apiClient";
 import {
+  analisisDumpSchema,
   esServidorSchema,
   exploracionRutaResponseSchema,
   respaldoEjecucionResponseSchema,
@@ -30,6 +31,7 @@ import {
   rutaConfigResponseSchema,
   rutaValidacionResponseSchema,
   subirRespaldoResponseSchema,
+  type AnalisisDump,
   type ArchivoSqlItem,
   type RespaldoEstado,
 } from "../../services/esquemas";
@@ -63,6 +65,8 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
   const [rutaExplorarInput, setRutaExplorarInput] = useState<string>("");
   const [archivoSeleccionado, setArchivoSeleccionado] = useState<ArchivoSqlItem | null>(null);
   const [dialogoConfirmarAbierto, setDialogoConfirmarAbierto] = useState<boolean>(false);
+  const [analisis, setAnalisis] = useState<AnalisisDump | null>(null);
+  const [importarUsuarios, setImportarUsuarios] = useState<boolean>(true);
   const inputSubirRef = useRef<HTMLInputElement>(null);
 
   // 1. Verificación estricta de dispositivo: solo el equipo servidor tiene acceso
@@ -172,10 +176,24 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
     },
   });
 
+  // Mutación para analizar el volcado antes de confirmar la restauración
+  const mutacionAnalizar = useMutation({
+    mutationFn: (rutaArchivo: string) =>
+      crear(rutaApi("/respaldos/analizar", usarLoopback), analisisDumpSchema, { ruta_archivo: rutaArchivo }),
+    onSuccess: (res) => {
+      setAnalisis(res);
+      setImportarUsuarios(true);
+      setDialogoConfirmarAbierto(true);
+    },
+  });
+
   // Mutación para restaurar la base de datos desde un archivo SQL
   const mutacionRestaurar = useMutation({
-    mutationFn: (rutaArchivo: string) =>
-      crear(rutaApi("/respaldos/restaurar", usarLoopback), restaurarRespaldoResponseSchema, { ruta_archivo: rutaArchivo }),
+    mutationFn: (datos: { rutaArchivo: string; importarUsuarios: boolean }) =>
+      crear(rutaApi("/respaldos/restaurar", usarLoopback), restaurarRespaldoResponseSchema, {
+        ruta_archivo: datos.rutaArchivo,
+        importar_usuarios: datos.importarUsuarios,
+      }),
     onSuccess: (res) => {
       setMensajeExito(res.mensaje);
       setDialogoConfirmarAbierto(false);
@@ -262,7 +280,16 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
   const handleConfirmarRestauracion = () => {
     if (!archivoSeleccionado) return;
     setMensajeExito(null);
-    mutacionRestaurar.mutate(archivoSeleccionado.ruta_completa);
+    mutacionRestaurar.mutate({
+      rutaArchivo: archivoSeleccionado.ruta_completa,
+      importarUsuarios: Boolean(analisis && analisis.usuarios > 0 && importarUsuarios),
+    });
+  };
+
+  const handleAnalizarArchivo = () => {
+    if (!archivoSeleccionado) return;
+    setMensajeExito(null);
+    mutacionAnalizar.mutate(archivoSeleccionado.ruta_completa);
   };
 
   // REGLA FUNDAMENTAL: Si no es administrador o si el dispositivo es remoto, NO se renderiza en el DOM
@@ -272,6 +299,8 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
 
   const ejecutando = Boolean(estado?.ejecutando || mutacionEjecutar.isPending || mutacionRestaurar.isPending);
   const explorador = consultaExplorador.data;
+  const progreso = estado?.ejecutando ? estado.progreso : null;
+  const hayErrores = (analisis?.errores.length ?? 0) > 0;
 
   return (
     <section aria-labelledby="titulo-respaldo" className="glass-card mt-6 p-6 overflow-hidden">
@@ -360,12 +389,34 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
               mutacionGuardarRuta.error ||
               mutacionEjecutar.error ||
               mutacionRestaurar.error ||
+              mutacionAnalizar.error ||
               mutacionSubir.error ||
               consultaExplorador.error) as ApiError | null
           }
         />
         {mensajeExito && <Aviso tipo="exito">{mensajeExito}</Aviso>}
       </div>
+
+      {progreso && progreso.total > 0 && (
+        <div className="mt-4">
+          <p id="etiqueta-progreso" className="text-sm font-semibold">
+            {`Importando ${progreso.tabla_actual ?? progreso.etapa} (${progreso.avance}/${progreso.total})`}
+          </p>
+          <div
+            role="progressbar"
+            aria-labelledby="etiqueta-progreso"
+            aria-valuemin={0}
+            aria-valuenow={progreso.avance}
+            aria-valuemax={progreso.total}
+            className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10"
+          >
+            <div
+              className="h-full rounded-full bg-marca-azul transition-all"
+              style={{ width: `${Math.min(100, (progreso.avance / progreso.total) * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* CONTENIDO PESTAÑA 1: GENERAR RESPALDO */}
       {pestanaActiva === "generar" && (
@@ -725,7 +776,9 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
                 <Boton
                   type="button"
                   variante="peligro"
-                  onClick={() => setDialogoConfirmarAbierto(true)}
+                  onClick={handleAnalizarArchivo}
+                  cargando={mutacionAnalizar.isPending}
+                  textoCargando="Analizando archivo…"
                   disabled={ejecutando}
                   icono={<Database size={16} />}
                 >
@@ -740,7 +793,7 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
       {/* Modal de confirmación para restaurar la base de datos */}
       <Dialogo
         abierto={dialogoConfirmarAbierto}
-        titulo="Confirmar restauración de base de datos"
+        titulo="Confirmar restauración"
         alCerrar={() => setDialogoConfirmarAbierto(false)}
         pie={
           <>
@@ -758,9 +811,9 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
               cargando={mutacionRestaurar.isPending}
               textoCargando="Iniciando restauración…"
               onClick={handleConfirmarRestauracion}
-              disabled={mutacionRestaurar.isPending}
+              disabled={mutacionRestaurar.isPending || hayErrores || !analisis?.valido}
             >
-              Sí, restaurar base de datos
+              Reemplazar datos y restaurar
             </Boton>
           </>
         }
@@ -769,15 +822,79 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
           <p className="text-sm">
             Está a punto de cargar y restaurar la base de datos desde el archivo:
           </p>
-          <div className="rounded-lg bg-black/5 dark:bg-white/10 p-3 font-mono text-xs break-all">
-            {archivoSeleccionado?.ruta_completa}
+          <div className="rounded-lg bg-black/5 dark:bg-white/10 p-3 text-xs">
+            <p className="font-mono break-all">{archivoSeleccionado?.ruta_completa}</p>
+            {analisis && (
+              <p className="mt-1 font-semibold">
+                {analisis.tipo === "mysql_legado"
+                  ? "Volcado del sistema anterior (MySQL)"
+                  : analisis.tipo === "postgres_check"
+                    ? "Respaldo de Check Contactos"
+                    : "Tipo de archivo desconocido"}
+              </p>
+            )}
           </div>
-          <p className="text-xs text-red-600 dark:text-red-400 font-semibold">
-            Esta operación sobreescribirá los registros actuales de contactos, motos, revisiones, SOATs y llamadas por los registros almacenados en el archivo seleccionado.
+
+          {analisis && analisis.tablas_importables.length > 0 && (
+            <table className="w-full text-left text-xs">
+              <caption className="sr-only">Tablas que se importarán</caption>
+              <thead>
+                <tr>
+                  <th scope="col" className="py-1 font-semibold">Tabla</th>
+                  <th scope="col" className="py-1 text-right font-semibold">Filas aprox.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analisis.tablas_importables.map((t) => (
+                  <tr key={t.nombre} className="border-t border-black/10 dark:border-white/10">
+                    <td className="py-1">{t.nombre}</td>
+                    <td className="py-1 text-right">{t.filas_aprox}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {hayErrores && (
+            <Aviso tipo="error">
+              <ul className="list-disc pl-4">
+                {analisis?.errores.map((e) => (
+                  <li key={e}>{e}</li>
+                ))}
+              </ul>
+            </Aviso>
+          )}
+          {analisis && analisis.advertencias.length > 0 && (
+            <Aviso tipo="advertencia">
+              <ul className="list-disc pl-4">
+                {analisis.advertencias.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ul>
+            </Aviso>
+          )}
+
+          {analisis && analisis.usuarios > 0 && (
+            <div>
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input
+                  type="checkbox"
+                  checked={importarUsuarios}
+                  onChange={(e) => setImportarUsuarios(e.target.checked)}
+                  aria-describedby="ayuda-importar-usuarios"
+                />
+                {`Importar ${analisis.usuarios} usuarios del archivo`}
+              </label>
+              <p id="ayuda-importar-usuarios" className="texto-secundario mt-1 text-xs">
+                Las cuentas nuevas usarán la clave temporal inicial del servidor y deberán cambiarla al ingresar. Las cuentas existentes no se modifican.
+              </p>
+            </div>
+          )}
+
+          <p className="text-xs font-semibold text-red-700 dark:text-red-300">
+            Esta operación reemplazará los datos actuales por los del archivo seleccionado.
           </p>
-          <p className="text-xs texto-secundario">
-            La restauración se ejecuta directamente en el motor PostgreSQL por consola en el servidor.
-          </p>
+          <p className="texto-secundario text-xs">Antes de reemplazar los datos se generará un respaldo automático.</p>
         </div>
       </Dialogo>
     </section>

@@ -34,8 +34,119 @@ describe("TarjetaRespaldo", () => {
     ultimo_resultado: "Listo para respaldar",
   };
 
+  const analisisBase = {
+    tipo: "mysql_legado",
+    valido: true,
+    completo: true,
+    errores: [] as string[],
+    advertencias: [] as string[],
+    usuarios: 3,
+    usuarios_admin: 0,
+    tablas_importables: [{ nombre: "contactos", filas_aprox: 120 }],
+  };
+
+  const archivoSql = {
+    nombre: "check_contactos-16-11-2026.sql",
+    ruta_completa: "F:\\Prueba\\check_contactos-16-11-2026.sql",
+    tamano_bytes: 1,
+    tamano_formateado: "1 MB",
+    modificado_en: "2026-11-16T16:45:00-05:00",
+  };
+
+  function mockServidor(estado: object = estadoBase) {
+    vi.mocked(recursos.obtener).mockImplementation((url: string) => {
+      if (url === "/respaldos/es-servidor") return Promise.resolve({ es_servidor: true });
+      if (url.startsWith("/respaldos/explorar")) {
+        return Promise.resolve({
+          ruta_actual: "F:\\Prueba",
+          ruta_padre: "F:\\",
+          carpetas: [],
+          archivos_sql: [archivoSql],
+          unidades_disponibles: ["F:\\"],
+        });
+      }
+      return Promise.resolve(estado);
+    });
+  }
+
+  async function abrirConfirmacion(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole("tab", { name: /cargar respaldo/i }));
+    await user.click(await screen.findByRole("button", { name: /^seleccionar$/i }));
+    await user.click(screen.getByRole("button", { name: /cargar respaldo al sistema \(\.sql\)/i }));
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("muestra errores del análisis y deshabilita confirmar", async () => {
+    const user = userEvent.setup();
+    mockServidor();
+    vi.mocked(recursos.crear).mockResolvedValueOnce({
+      ...analisisBase,
+      valido: false,
+      errores: ["El volcado está incompleto."],
+    });
+    renderizar();
+    await abrirConfirmacion(user);
+
+    expect(await screen.findByText("El volcado está incompleto.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reemplazar datos y restaurar/i })).toBeDisabled();
+    expect(recursos.crear).toHaveBeenCalledWith("/respaldos/analizar", expect.anything(), {
+      ruta_archivo: archivoSql.ruta_completa,
+    });
+  });
+
+  it("envía importar_usuarios=false al desmarcar la casilla", async () => {
+    const user = userEvent.setup();
+    mockServidor();
+    vi.mocked(recursos.crear)
+      .mockResolvedValueOnce(analisisBase)
+      .mockResolvedValueOnce({ mensaje: "Iniciada.", archivo: "x.sql", iniciado_en: "2026-11-16T14:00:00-05:00" });
+    renderizar();
+    await abrirConfirmacion(user);
+
+    expect(await screen.findByText("Volcado del sistema anterior (MySQL)")).toBeInTheDocument();
+    expect(screen.getByText("contactos")).toBeInTheDocument();
+    expect(screen.getByText(/Las cuentas nuevas usarán la clave temporal inicial/)).toBeInTheDocument();
+    const casilla = screen.getByRole("checkbox", { name: "Importar 3 usuarios del archivo" });
+    expect(casilla).toBeChecked();
+    await user.click(casilla);
+    await user.click(screen.getByRole("button", { name: /reemplazar datos y restaurar/i }));
+
+    expect(recursos.crear).toHaveBeenLastCalledWith("/respaldos/restaurar", expect.anything(), {
+      ruta_archivo: archivoSql.ruta_completa,
+      importar_usuarios: false,
+    });
+  });
+
+  it("muestra advertencia de administradores legados", async () => {
+    const user = userEvent.setup();
+    mockServidor();
+    vi.mocked(recursos.crear).mockResolvedValueOnce({
+      ...analisisBase,
+      usuarios_admin: 1,
+      advertencias: ["El archivo contiene 1 administrador legado."],
+    });
+    renderizar();
+    await abrirConfirmacion(user);
+
+    expect(await screen.findByText("El archivo contiene 1 administrador legado.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reemplazar datos y restaurar/i })).toBeEnabled();
+  });
+
+  it("muestra progreso con aria-valuenow", async () => {
+    mockServidor({
+      ...estadoBase,
+      ejecutando: true,
+      progreso: { etapa: "importando", tabla_actual: "contactos", avance: 2, total: 5 },
+    });
+    renderizar();
+
+    const barra = await screen.findByRole("progressbar");
+    expect(barra).toHaveAttribute("aria-valuenow", "2");
+    expect(barra).toHaveAttribute("aria-valuemax", "5");
+    expect(screen.getByText("Importando contactos (2/5)")).toBeInTheDocument();
   });
 
   it("en dispositivo remoto NO muestra ningún botón ni tarjeta en el DOM", async () => {
@@ -264,7 +375,7 @@ describe("TarjetaRespaldo", () => {
       }
       return Promise.resolve(estadoBase);
     });
-    vi.mocked(recursos.crear).mockResolvedValueOnce({
+    vi.mocked(recursos.crear).mockResolvedValueOnce(analisisBase).mockResolvedValueOnce({
       mensaje: "Restauración de la base de datos iniciada por consola en el servidor.",
       archivo: "check_contactos-16-11-2026.sql",
       iniciado_en: "2026-11-16T14:00:00-05:00",
@@ -281,15 +392,15 @@ describe("TarjetaRespaldo", () => {
     const botonCargar = screen.getByRole("button", { name: /cargar respaldo al sistema \(\.sql\)/i });
     await user.click(botonCargar);
 
-    // Se abre el diálogo modal
-    expect(screen.getByText("Confirmar restauración de base de datos")).toBeInTheDocument();
-    const botonConfirmar = screen.getByRole("button", { name: /sí, restaurar base de datos/i });
+    // Se abre el diálogo modal tras el análisis
+    expect(await screen.findByText("Confirmar restauración")).toBeInTheDocument();
+    const botonConfirmar = screen.getByRole("button", { name: /reemplazar datos y restaurar/i });
     await user.click(botonConfirmar);
 
     expect(recursos.crear).toHaveBeenCalledWith(
       "/respaldos/restaurar",
       expect.anything(),
-      { ruta_archivo: "F:\\Prueba\\check_contactos-16-11-2026.sql" },
+      { ruta_archivo: "F:\\Prueba\\check_contactos-16-11-2026.sql", importar_usuarios: true },
     );
     expect(await screen.findByText("Restauración de la base de datos iniciada por consola en el servidor.")).toBeInTheDocument();
   });
