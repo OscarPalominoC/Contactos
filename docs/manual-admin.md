@@ -1,7 +1,7 @@
 ---
 persona: oscar
 ia: Claude Code (Claude Opus 5.5)
-actualizado: 2026-11-14 17:45
+actualizado: 2026-11-16 18:05
 zona_horaria: America/Bogota
 ---
 # Manual de administración — Check Contactos
@@ -72,16 +72,16 @@ Desde **Tablero → Cargar respaldo** (solo un administrador, y solo desde el eq
 
 1. **Análisis previo.** Antes de tocar nada, el archivo se analiza y el diálogo muestra el tipo (PostgreSQL o volcado MySQL legado), las tablas que se importarán, las que no, y la cantidad de cuentas. Un archivo incompleto (sin la marca final, por ejemplo una subida cortada o un disco lleno) se bloquea con el motivo «incompleto» y no se modifica la base.
 2. **Respaldo previo automático.** Si el análisis es válido, se crea un respaldo de la base actual en la carpeta de respaldos configurada. Si no se puede crear, la restauración se cancela y la base no cambia.
-3. **Importación todo o nada.** El volcado MySQL se importa en una sola transacción: si algo falla, la base queda exactamente como estaba. El progreso se muestra por tabla (1/10 … 10/10). Si un archivo corrupto falla a mitad de la importación, la base queda intacta; el error mostrado puede ser técnico.
+3. **Importación todo o nada.** El volcado MySQL se importa en una sola transacción: si algo falla, la base queda exactamente como estaba. El progreso se muestra por tabla (1/10 … 10/10) y, en las demás etapas, con un texto («Analizando archivo…», «Creando respaldo previo…»). Si un archivo corrupto falla a mitad de la importación, la base queda intacta y el error indica la tabla con datos ilegibles. El respaldo previo nunca borra, al depurar los antiguos, el archivo que se está restaurando.
 4. **Qué se importa.** Las 10 tablas de Check Contactos (contacto, moto, marca, línea, revisión, SOAT, llamadas y entrada al sistema) y las cuentas de usuario. Las demás tablas del sistema anterior (51 en el volcado del 2026-11-07) **no se importan**; el diálogo lo advierte.
-5. **Cuentas importadas.** Se crean con la clave `CLAVE_TEMPORAL_INICIAL` y el cambio de clave es obligatorio en el primer ingreso. La columna de claves del legado nunca se lee. **Las cuentas que ya existen no se tocan** (ni su clave ni su rol), de modo que quien restaura conserva su sesión. Si el legado trae cuentas con rol administrador, el análisis lo advierte: quedan con una clave temporal compartida; revíselas y desactive las de prueba. Con `--sin-usuarios` no se importan cuentas.
-6. **Informe.** Queda en `logs/importacion-AAAA-MM-DD-HHMM.md`. Cada tabla debe cuadrar: insertadas + rechazadas + repetidas + omitidas = origen. Las filas rechazadas quedan en **Rechazos de importación**.
+5. **Cuentas importadas.** Se crean con la clave `CLAVE_TEMPORAL_INICIAL` y el cambio de clave es obligatorio en el primer ingreso. La columna de claves del legado nunca se lee. **Las cuentas que ya existen no se tocan** (ni su clave ni su rol), de modo que quien restaura conserva su sesión. **Las cuentas con rol administrador se crean inactivas**: el análisis lo advierte y un administrador actual debe activarlas desde **Usuarios** (active solo las que correspondan a personas reales; las de prueba, como `01` o `5000`, déjelas inactivas). **Si `CLAVE_TEMPORAL_INICIAL` es el valor por defecto público del código, no se importa ninguna cuenta** (el informe lo indica): defina una clave propia antes de restaurar. Con `--sin-usuarios` no se importan cuentas.
+6. **Informe.** Queda en `logs/importacion-AAAA-MM-DD-HHMM.md`. Cada tabla debe cuadrar: insertadas + rechazadas + repetidas + omitidas = origen. Las filas rechazadas quedan en **Rechazos de importación**. Si alguna tabla no cuadra, la importación se revierte completa y el informe se escribe igual, encabezado con «IMPORTACIÓN REVERTIDA», para ubicar la tabla con problemas.
 
 ## Variables de entorno (`backend/.env` y frontend)
 
 | Variable | Qué hace | Valor por defecto |
 |---|---|---|
-| `CLAVE_TEMPORAL_INICIAL` | Clave de las cuentas importadas del legado. **Defina la suya**: el código trae un valor por defecto público, quien lo conozca podría entrar a cualquier cuenta importada que aún no haya cambiado su clave. | Tiene un valor por defecto público en el código: reemplácelo definiendo el suyo en `backend/.env` (`CLAVE_TEMPORAL_INICIAL=<defina una clave propia>`). |
+| `CLAVE_TEMPORAL_INICIAL` | Clave de las cuentas importadas del legado. **Defina la suya**: el código trae un valor por defecto público y, mientras no se cambie, la importación del legado no crea cuentas. | Tiene un valor por defecto público en el código: reemplácelo definiendo el suyo en `backend/.env` (`CLAVE_TEMPORAL_INICIAL=<defina una clave propia>`). |
 | `SESION_DIAS` | Días de duración de la sesión; se renueva con el uso. | 30 |
 | `VITE_INACTIVIDAD_MINUTOS` | Frontend. Minutos de inactividad tras los cuales se cierra la sesión. | Sin definir: no se cierra por inactividad |
 

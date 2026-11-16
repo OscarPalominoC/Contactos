@@ -11,9 +11,10 @@ Uso: python manage.py importar_legado ../CONTACTOS_recuperado_2026-11-07.sql
 import logging
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
@@ -28,6 +29,9 @@ from apps.cuentas.models import ROLES, Ingreso, Usuario
 from apps.llamadas.models import LlamadaCumpleanos, LlamadaRtm, LlamadaSoat
 from apps.revisiones.models import Revision, Soat
 from apps.vehiculos.models import Linea, Marca, Moto
+
+if TYPE_CHECKING:
+    from apps.comun.analisis_dump import InformeDump
 
 logger = logging.getLogger(__name__)
 LOTE = 5000
@@ -257,6 +261,18 @@ def _lotes(iterable: Iterator[models.Model], tamano: int) -> Iterator[list[model
         yield lote
 
 
+@contextmanager
+def _datos_legibles(tabla: str) -> Iterator[None]:
+    """Convierte un error del autómata de `legado.py` en un mensaje sin valores de las filas (NIP, placas)."""
+    try:
+        yield
+    except (ValueError, IndexError) as exc:
+        logger.error("Datos ilegibles en la tabla legada %s (%s)", tabla, type(exc).__name__)
+        raise CommandError(
+            f"El volcado tiene datos ilegibles en la tabla `{tabla}`; no se modificó la base de datos."
+        ) from exc
+
+
 def importar_tabla(ruta: Path, tabla: Tabla) -> Resultado:
     """Carga una tabla (savepoint dentro de `importar_dump`). Las PK repetidas se registran como rechazo."""
     resultado = Resultado(tabla.legada)
@@ -290,9 +306,10 @@ def importar_tabla(ruta: Path, tabla: Tabla) -> Resultado:
     with transaction.atomic():
         tabla.modelo._default_manager.all()._raw_delete(tabla.modelo._default_manager.db)  # type: ignore[attr-defined]
         ImportacionRechazo.objects.filter(tabla=tabla.legada).delete()
-        for lote in _lotes(instancias(), LOTE):
-            tabla.modelo._default_manager.bulk_create(lote, batch_size=LOTE)
-            resultado.insertadas += len(lote)
+        with _datos_legibles(tabla.legada):
+            for lote in _lotes(instancias(), LOTE):
+                tabla.modelo._default_manager.bulk_create(lote, batch_size=LOTE)
+                resultado.insertadas += len(lote)
         ImportacionRechazo.objects.bulk_create(rechazos, batch_size=LOTE)
         _ajustar_secuencia(tabla.modelo)
     return resultado
@@ -303,9 +320,16 @@ def importar_usuarios(ruta: Path) -> Resultado:
 
     Solo se leen nip (0), nombre (1) y tipo (3): la columna 2 (`clave`) nunca se toca.
     Las cuentas que ya existen no se modifican y cuentan como omitidas.
+    Las cuentas con rol administrador se crean inactivas (un administrador actual debe activarlas), y si la
+    clave temporal es la pública por defecto no se crea ninguna: cualquiera la conoce.
     """
     resultado = Resultado("usuario")
     clave_inicial = (settings.CLAVE_TEMPORAL_INICIAL or "").strip()
+    if clave_inicial == settings.CLAVE_TEMPORAL_PUBLICA:
+        clave_inicial = ""
+        motivo_sin_clave = "CLAVE_TEMPORAL_INICIAL es la clave pública por defecto: usuarios no importados"
+    else:
+        motivo_sin_clave = "CLAVE_TEMPORAL_INICIAL no configurada: usuarios no importados"
     roles = {codigo for codigo, _ in ROLES}
     ImportacionRechazo.objects.filter(tabla="usuario").delete()
     existentes = set(Usuario.objects.values_list("nip", flat=True))
@@ -322,7 +346,9 @@ def importar_usuarios(ruta: Path) -> Resultado:
         else:
             resultado.rechazadas += 1
 
-    for fila in filas_de_tabla(ruta, "usuario"):
+    with _datos_legibles("usuario"):
+        filas = list(filas_de_tabla(ruta, "usuario"))  # pocas filas: se leen de una vez
+    for fila in filas:
         resultado.origen += 1
         if len(fila) != 4:
             rechazar(fila, f"se esperaban 4 columnas y llegaron {len(fila)}")
@@ -344,7 +370,7 @@ def importar_usuarios(ruta: Path) -> Resultado:
         if not clave_inicial:
             resultado.omitidas += 1
             if not sin_clave_avisado:
-                resultado.contar("CLAVE_TEMPORAL_INICIAL no configurada: usuarios no importados")
+                resultado.contar(motivo_sin_clave)
                 sin_clave_avisado = True
             continue
         tipo = n.texto(fila[3])
@@ -356,7 +382,10 @@ def importar_usuarios(ruta: Path) -> Resultado:
         if len(nombre) > 255:
             nombre = nombre[:255]
             resultado.contar("nombre recortado a 255 caracteres")
-        cuenta = Usuario(nip=nip, nombre=nombre, rol=rol, debe_cambiar_clave=True, is_active=True)
+        es_admin = rol == "administrador"
+        if es_admin:
+            resultado.contar("administrador legado creado inactivo")
+        cuenta = Usuario(nip=nip, nombre=nombre, rol=rol, debe_cambiar_clave=True, is_active=not es_admin)
         cuenta.set_password(clave_inicial)
         cuenta.save()
         cuenta.sincronizar_grupo()
@@ -404,42 +433,64 @@ def importar_dump(
     elegidas: set[str] | None = None,
     importar_usuarios: bool = True,
     al_avanzar: AlAvanzar | None = None,
+    analisis: "InformeDump | None" = None,
+    destino_informe: Path | None = None,
 ) -> tuple[list[Resultado], dict[str, int]]:
-    """Valida el volcado y lo importa en una sola transacción. Devuelve (resultados por tabla, huérfanos)."""
+    """Valida el volcado y lo importa en una sola transacción. Devuelve (resultados por tabla, huérfanos).
+
+    `analisis` evita recorrer otra vez el archivo si quien llama ya lo analizó. Si alguna tabla no cuadra, antes
+    de deshacer todo se escribe el informe (en `destino_informe` o el predeterminado) marcado como revertido.
+    """
     from django.apps import apps as registro
 
     from apps.comun.analisis_dump import analizar_dump
     from apps.comun.saneamiento import sanear_datos_legados
 
-    informe_dump = analizar_dump(ruta)
+    informe_dump = analisis if analisis is not None else analizar_dump(ruta)
     if not informe_dump.valido or informe_dump.tipo != "mysql_legado":
         raise CommandError("; ".join(informe_dump.errores) or "El archivo no es un volcado MySQL del legado.")
     tablas = [t for t in TABLAS if elegidas is None or t.legada in elegidas]
     resultados: list[Resultado] = []
+    inicio = time.monotonic()
+    actual = ""
     try:
         with transaction.atomic():
             for tabla in reversed(tablas):
                 tabla.modelo._default_manager.all()._raw_delete(tabla.modelo._default_manager.db)  # type: ignore[attr-defined]
             for indice, tabla in enumerate(tablas, start=1):
+                actual = tabla.legada
                 resultados.append(importar_tabla(ruta, tabla))
                 if al_avanzar:
                     al_avanzar(tabla.legada, indice, len(tablas))
             if importar_usuarios:
+                actual = "usuario"
                 resultados.append(_importar_cuentas(ruta))
+            actual = ""
             sanear_datos_legados(registro)
             faltantes = huerfanos()
             malas = [r.tabla for r in resultados if not _cuadra(r)]
             if malas:
+                escribir_informe(resultados, faltantes, time.monotonic() - inicio, destino_informe, revertida=True)
                 raise CommandError(f"Hay tablas que no cuadran ({', '.join(malas)}); no se importó nada.")
     except CommandError:
         raise
-    except Exception as exc:  # volcado ilegible o fallo de BD: la transacción ya se revirtió
-        logger.exception("Falló la importación del legado")
-        raise CommandError(f"No se pudo importar el volcado ({type(exc).__name__}): {exc}") from exc
+    except Exception as exc:  # fallo de BD u otro imprevisto: la transacción ya se revirtió
+        # Sin str(exc) ni traza: podrían contener valores de las filas (NIP, placas).
+        logger.error("Falló la importación del legado en la tabla %r (%s)", actual, type(exc).__name__)
+        raise CommandError(
+            f"No se pudo importar el volcado ({type(exc).__name__}); no se modificó la base de datos."
+        ) from exc
     return resultados, faltantes
 
 
-def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: float) -> str:
+_AVISO_REVERTIDA = [
+    "**IMPORTACIÓN REVERTIDA: hay tablas que no cuadran.** La base de datos quedó como estaba y tampoco se",
+    "guardaron los rechazos de esta corrida; los conteos de abajo sirven para ubicar la tabla con problemas.",
+    "",
+]
+
+
+def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: float, *, revertida: bool = False) -> str:
     """Informe en Markdown, sin datos personales."""
     ahora = timezone.localtime()
     lineas = [
@@ -451,6 +502,7 @@ def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: fl
         "---",
         f"# Informe de importación del legado — {ahora:%Y-%m-%d %H:%M}",
         "",
+        *(_AVISO_REVERTIDA if revertida else []),
         f"Duración: {segundos:.0f} s. Regla de cuadre: insertadas + rechazadas + duplicadas + omitidas = filas de origen.",
         "",
         "| Tabla legada | Origen | Insertadas | Rechazadas | Duplicadas | Omitidas | ¿Cuadra? |",
@@ -479,14 +531,19 @@ def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: fl
 
 
 def escribir_informe(
-    resultados: list[Resultado], faltantes: dict[str, int], segundos: float, destino: Path | None = None
+    resultados: list[Resultado],
+    faltantes: dict[str, int],
+    segundos: float,
+    destino: Path | None = None,
+    *,
+    revertida: bool = False,
 ) -> Path:
     """Escribe el informe Markdown (por defecto en `logs/importacion-*.md`) y devuelve su ruta."""
     destino = destino or Path(__file__).resolve().parents[5] / "logs" / (
         f"importacion-{timezone.localtime():%Y-%m-%d-%H%M}.md"
     )
     destino.parent.mkdir(parents=True, exist_ok=True)
-    destino.write_text(informe(resultados, faltantes, segundos), encoding="utf-8")
+    destino.write_text(informe(resultados, faltantes, segundos, revertida=revertida), encoding="utf-8")
     return destino
 
 
@@ -510,7 +567,11 @@ class Command(BaseCommand):
             self.stdout.write(f"[{indice}/{total}] {tabla}")
 
         resultados, faltantes = importar_dump(
-            ruta, elegidas=elegidas, importar_usuarios=not opciones["sin_usuarios"], al_avanzar=avance
+            ruta,
+            elegidas=elegidas,
+            importar_usuarios=not opciones["sin_usuarios"],
+            al_avanzar=avance,
+            destino_informe=opciones["informe"],
         )
         for r in resultados:
             self.stdout.write(

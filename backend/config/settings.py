@@ -102,7 +102,9 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 # Duración de la sesión en días; cada renovación (rotación del refresh) reinicia la ventana completa.
 SESION_DIAS: int = env.int("SESION_DIAS", default=30)
-CLAVE_TEMPORAL_INICIAL: str = env.str("CLAVE_TEMPORAL_INICIAL", default="CheckLTDA!")
+# Valor por defecto público (está en el código): la importación del legado se niega a usarlo.
+CLAVE_TEMPORAL_PUBLICA = "CheckLTDA!"
+CLAVE_TEMPORAL_INICIAL: str = env.str("CLAVE_TEMPORAL_INICIAL", default=CLAVE_TEMPORAL_PUBLICA)
 
 # django-axes: 5 intentos fallidos bloquean nip + IP durante 1 hora.
 AXES_FAILURE_LIMIT = 5

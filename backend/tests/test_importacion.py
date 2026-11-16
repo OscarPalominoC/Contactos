@@ -252,12 +252,62 @@ class TestImportacionSegura:
             "INSERT INTO `contacto` VALUES ('100','ANA','0','300',15,'Febrero','ND','ND','OP','habilitado',NULL,0);\n"
             "INSERT INTO `revision` VALUES (NULL,'C1'\n",
         )
-        with pytest.raises(CommandError):
+        with pytest.raises(CommandError) as error:
             call_command("importar_legado", str(ruta), informe=tmp_path / "i.md")
+        assert str(error.value) == (
+            "El volcado tiene datos ilegibles en la tabla `revision`; no se modificó la base de datos."
+        )
         assert Contacto.objects.filter(nip="OLD").exists()
         assert Moto.objects.count() == 1
         assert Marca.objects.count() == 0
         assert ImportacionRechazo.objects.count() == antes
+
+    def test_error_inesperado_no_expone_valores(self, dump: Path, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch(IMPORTAR + ".importar_tabla", side_effect=RuntimeError("fila con NIP 100 y placa ABC12D")),
+            pytest.raises(CommandError) as error,
+        ):
+            call_command("importar_legado", str(dump), informe=tmp_path / "i.md")
+        mensaje = str(error.value)
+        assert mensaje == "No se pudo importar el volcado (RuntimeError); no se modificó la base de datos."
+        assert "100" not in mensaje and "ABC12D" not in mensaje
+
+    def test_cuadre_fallido_deja_informe_y_revierte(self, dump: Path, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        from apps.comun.management.commands import importar_legado as modulo
+
+        real = modulo.importar_tabla
+
+        def descuadrada(ruta: Path, tabla: Any) -> Any:
+            resultado = real(ruta, tabla)
+            if tabla.legada == "marca":
+                resultado.origen += 1
+            return resultado
+
+        Contacto.objects.create(nip="OLD", nombre="VIEJO")
+        informe = tmp_path / "i.md"
+        with patch(IMPORTAR + ".importar_tabla", side_effect=descuadrada), pytest.raises(CommandError, match="cuadran"):
+            call_command("importar_legado", str(dump), informe=informe)
+        texto = informe.read_text(encoding="utf-8")
+        assert texto.index("IMPORTACIÓN REVERTIDA: hay tablas que no cuadran") < texto.index("| Tabla legada")
+        assert "| marca | 3 | 2 | 0 | 0 | 0 | NO |" in texto
+        assert Contacto.objects.filter(nip="OLD").exists()
+        assert Marca.objects.count() == 0
+
+    def test_importar_dump_reutiliza_analisis(self, dump: Path) -> None:
+        from unittest.mock import patch
+
+        from apps.comun.analisis_dump import analizar_dump
+        from apps.comun.management.commands.importar_legado import importar_dump
+
+        analisis = analizar_dump(dump)
+        with patch("apps.comun.analisis_dump.analizar_dump") as mock_analizar:
+            importar_dump(dump, importar_usuarios=False, analisis=analisis)
+        assert not mock_analizar.called
+        assert Marca.objects.count() == 2
 
     def test_volcado_invalido_no_borra_nada(self, tmp_path: Path) -> None:
         Contacto.objects.create(nip="OLD", nombre="VIEJO")
@@ -295,6 +345,7 @@ class TestImportacionSegura:
 
 
 CLAVE_INICIAL = "Temporal#2026x"
+IMPORTAR = "apps.comun.management.commands.importar_legado"
 
 
 @pytest.mark.django_db
@@ -332,6 +383,8 @@ class TestImportacionUsuarios:
         call_command("importar_legado", str(ruta), informe=informe)
         assert Usuario.objects.get(nip="300").rol == "usuario"
         assert Usuario.objects.get(nip="400").rol == "administrador"
+        assert Usuario.objects.get(nip="300").is_active
+        assert not Usuario.objects.get(nip="400").is_active
         assert "usuario: tipo 'gerente' → usuario (1)" in informe.read_text(encoding="utf-8")
 
     def test_sin_clave_temporal_no_crea_usuarios(self, dump: Path, tmp_path: Path, grupos: Any, settings: Any) -> None:
@@ -367,3 +420,28 @@ class TestImportacionUsuarios:
         for _ in range(2):
             call_command("importar_legado", str(ruta), informe=tmp_path / "i.md")
         assert ImportacionRechazo.objects.filter(tabla="usuario").count() == 1
+
+    def test_admin_legado_se_crea_inactivo(self, tmp_path: Path, grupos: Any) -> None:
+        ruta = _escribir(
+            tmp_path,
+            "INSERT INTO `usuario` VALUES ('01','PRUEBA','x',' Administrador '),('7','OPERADOR','x','usuario');\n",
+        )
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(ruta), informe=informe)
+        admin = Usuario.objects.get(nip="01")
+        assert admin.rol == "administrador"
+        assert not admin.is_active
+        assert admin.check_password(CLAVE_INICIAL)
+        assert Usuario.objects.get(nip="7").is_active
+        assert "usuario: administrador legado creado inactivo (1)" in informe.read_text(encoding="utf-8")
+
+    def test_clave_publica_por_defecto_no_crea_usuarios(
+        self, dump: Path, tmp_path: Path, grupos: Any, settings: Any
+    ) -> None:
+        settings.CLAVE_TEMPORAL_INICIAL = f"  {settings.CLAVE_TEMPORAL_PUBLICA} "
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(dump), informe=informe)
+        assert not Usuario.objects.filter(nip="100").exists()
+        texto = informe.read_text(encoding="utf-8")
+        assert "CLAVE_TEMPORAL_INICIAL es la clave pública por defecto: usuarios no importados" in texto
+        assert "| usuario | 1 | 0 | 0 | 0 | 1 | Sí |" in texto
