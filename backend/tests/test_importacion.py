@@ -292,3 +292,78 @@ class TestImportacionSegura:
         importar_dump(dump, al_avanzar=lambda t, i, total: registro.append((t, i, total)))
         assert len(registro) == 10
         assert registro[-1] == ("entrada_sistema", 10, 10)
+
+
+CLAVE_INICIAL = "Temporal#2026x"
+
+
+@pytest.mark.django_db
+class TestImportacionUsuarios:
+    @pytest.fixture(autouse=True)
+    def _clave_inicial(self, settings: Any) -> None:
+        settings.CLAVE_TEMPORAL_INICIAL = CLAVE_INICIAL
+
+    def test_importa_usuarios_con_clave_temporal_inicial(self, dump: Path, tmp_path: Path, grupos: Any) -> None:
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(dump), informe=informe)
+        u = Usuario.objects.get(nip="100")
+        assert u.check_password(CLAVE_INICIAL)
+        assert not u.check_password("clave-legada-que-no-se-usa")
+        assert u.debe_cambiar_clave
+        assert u.rol == "usuario"
+        assert u.nombre == "ANA"
+        assert "| usuario | 1 | 1 | 0 | 0 | 0 | Sí |" in informe.read_text(encoding="utf-8")
+
+    def test_no_modifica_usuario_existente(self, dump: Path, tmp_path: Path, grupos: Any) -> None:
+        Usuario.objects.create_user("100", "ADMIN", "Actual#2026xx", rol="administrador")
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(dump), informe=informe)
+        u = Usuario.objects.get(nip="100")
+        assert u.check_password("Actual#2026xx")
+        assert u.rol == "administrador"
+        assert u.nombre == "ADMIN"
+        assert "| usuario | 1 | 0 | 0 | 0 | 1 | Sí |" in informe.read_text(encoding="utf-8")
+
+    def test_tipo_desconocido_mapea_a_usuario(self, tmp_path: Path, grupos: Any) -> None:
+        ruta = _escribir(
+            tmp_path, "INSERT INTO `usuario` VALUES ('300','LUIS','x','gerente'),('400','EVA','x','Administrador');\n"
+        )
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(ruta), informe=informe)
+        assert Usuario.objects.get(nip="300").rol == "usuario"
+        assert Usuario.objects.get(nip="400").rol == "administrador"
+        assert "usuario: tipo 'gerente' → usuario (1)" in informe.read_text(encoding="utf-8")
+
+    def test_sin_clave_temporal_no_crea_usuarios(self, dump: Path, tmp_path: Path, grupos: Any, settings: Any) -> None:
+        settings.CLAVE_TEMPORAL_INICIAL = ""
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(dump), informe=informe)
+        assert not Usuario.objects.filter(nip="100").exists()
+        assert Contacto.objects.count() == 2
+        texto = informe.read_text(encoding="utf-8")
+        assert "CLAVE_TEMPORAL_INICIAL no configurada" in texto
+        assert "| usuario | 1 | 0 | 0 | 0 | 1 | Sí |" in texto
+
+    def test_sin_usuarios_flag(self, dump: Path, tmp_path: Path, grupos: Any) -> None:
+        call_command("importar_legado", str(dump), "--sin-usuarios", informe=tmp_path / "i.md")
+        assert not Usuario.objects.filter(nip="100").exists()
+        assert Contacto.objects.count() == 2
+
+    def test_nip_vacio_o_largo_se_rechaza_sin_la_clave(self, tmp_path: Path, grupos: Any) -> None:
+        ruta = _escribir(
+            tmp_path,
+            f"INSERT INTO `usuario` VALUES ('','SIN NIP','SECRETO-LEGADO','usuario'),('{'9' * 21}','LARGO','SECRETO-LEGADO','usuario');\n",  # noqa: S608
+        )
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(ruta), informe=informe)
+        rechazos = list(ImportacionRechazo.objects.filter(tabla="usuario"))
+        assert len(rechazos) == 2
+        assert all("SECRETO-LEGADO" not in r.fila_origen for r in rechazos)
+        assert "SECRETO-LEGADO" not in informe.read_text(encoding="utf-8")
+        assert Usuario.objects.count() == 0
+
+    def test_reimportar_no_duplica_rechazos(self, tmp_path: Path, grupos: Any) -> None:
+        ruta = _escribir(tmp_path, "INSERT INTO `usuario` VALUES ('','SIN NIP','x','usuario');\n")
+        for _ in range(2):
+            call_command("importar_legado", str(ruta), informe=tmp_path / "i.md")
+        assert ImportacionRechazo.objects.filter(tabla="usuario").count() == 1

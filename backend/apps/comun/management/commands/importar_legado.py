@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import connection, models, transaction
 from django.utils import timezone
@@ -23,7 +24,7 @@ from apps.comun import normalizacion as n
 from apps.comun.legado import Valor, filas_de_tabla
 from apps.comun.models import ImportacionRechazo
 from apps.contactos.models import Contacto
-from apps.cuentas.models import Ingreso
+from apps.cuentas.models import ROLES, Ingreso, Usuario
 from apps.llamadas.models import LlamadaCumpleanos, LlamadaRtm, LlamadaSoat
 from apps.revisiones.models import Revision, Soat
 from apps.vehiculos.models import Linea, Marca, Moto
@@ -297,6 +298,77 @@ def importar_tabla(ruta: Path, tabla: Tabla) -> Resultado:
     return resultado
 
 
+def importar_usuarios(ruta: Path) -> Resultado:
+    """Crea las cuentas nuevas con `CLAVE_TEMPORAL_INICIAL` y cambio obligatorio (corre dentro de `importar_dump`).
+
+    Solo se leen nip (0), nombre (1) y tipo (3): la columna 2 (`clave`) nunca se toca.
+    Las cuentas que ya existen no se modifican y cuentan como omitidas.
+    """
+    resultado = Resultado("usuario")
+    clave_inicial = (settings.CLAVE_TEMPORAL_INICIAL or "").strip()
+    roles = {codigo for codigo, _ in ROLES}
+    ImportacionRechazo.objects.filter(tabla="usuario").delete()
+    existentes = set(Usuario.objects.values_list("nip", flat=True))
+    vistos: set[str] = set()
+    rechazos: list[ImportacionRechazo] = []
+    sin_clave_avisado = False
+
+    def rechazar(fila: list[Valor], motivo: str, *, duplicada: bool = False) -> None:
+        # Nunca se copia la fila completa: contendría la clave legada.
+        origen = repr([fila[0], fila[1], fila[3]] if len(fila) == 4 else [])[:2000]
+        rechazos.append(ImportacionRechazo(tabla="usuario", fila_origen=origen, motivo=motivo))
+        if duplicada:
+            resultado.duplicadas += 1
+        else:
+            resultado.rechazadas += 1
+
+    for fila in filas_de_tabla(ruta, "usuario"):
+        resultado.origen += 1
+        if len(fila) != 4:
+            rechazar(fila, f"se esperaban 4 columnas y llegaron {len(fila)}")
+            continue
+        nip = n.mayusculas_sin_espacios(fila[0])
+        if not nip:
+            rechazar(fila, "nip vacío")
+            continue
+        if len(nip) > 20:
+            rechazar(fila, "nip excede 20 caracteres")
+            continue
+        if nip in vistos:
+            rechazar(fila, "clave repetida en el legado", duplicada=True)
+            continue
+        vistos.add(nip)
+        if nip in existentes:
+            resultado.omitidas += 1
+            continue
+        if not clave_inicial:
+            resultado.omitidas += 1
+            if not sin_clave_avisado:
+                resultado.contar("CLAVE_TEMPORAL_INICIAL no configurada: usuarios no importados")
+                sin_clave_avisado = True
+            continue
+        tipo = n.texto(fila[3])
+        rol = tipo.lower()
+        if rol not in roles:
+            resultado.contar(f"tipo '{tipo}' → usuario")
+            rol = "usuario"
+        nombre = n.texto(fila[1]).upper()
+        if len(nombre) > 255:
+            nombre = nombre[:255]
+            resultado.contar("nombre recortado a 255 caracteres")
+        cuenta = Usuario(nip=nip, nombre=nombre, rol=rol, debe_cambiar_clave=True, is_active=True)
+        cuenta.set_password(clave_inicial)
+        cuenta.save()
+        cuenta.sincronizar_grupo()
+        resultado.insertadas += 1
+    ImportacionRechazo.objects.bulk_create(rechazos, batch_size=LOTE)
+    return resultado
+
+
+# El parámetro `importar_usuarios` de `importar_dump` oculta la función; se usa este alias.
+_importar_cuentas = importar_usuarios
+
+
 def _ajustar_secuencia(modelo: type[models.Model]) -> None:
     """Tras insertar ids explícitos, la secuencia autoincremental continúa desde el máximo (utilidad de Django)."""
     from django.core.management.color import no_style
@@ -330,7 +402,7 @@ def importar_dump(
     ruta: Path,
     *,
     elegidas: set[str] | None = None,
-    importar_usuarios: bool = True,  # lo usa la importación de cuentas (no-op por ahora)
+    importar_usuarios: bool = True,
     al_avanzar: AlAvanzar | None = None,
 ) -> tuple[list[Resultado], dict[str, int]]:
     """Valida el volcado y lo importa en una sola transacción. Devuelve (resultados por tabla, huérfanos)."""
@@ -352,6 +424,8 @@ def importar_dump(
                 resultados.append(importar_tabla(ruta, tabla))
                 if al_avanzar:
                     al_avanzar(tabla.legada, indice, len(tablas))
+            if importar_usuarios:
+                resultados.append(_importar_cuentas(ruta))
             sanear_datos_legados(registro)
             faltantes = huerfanos()
             malas = [r.tabla for r in resultados if not _cuadra(r)]
