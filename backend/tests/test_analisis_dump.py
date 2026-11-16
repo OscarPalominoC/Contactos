@@ -1,6 +1,7 @@
 """Compuerta de análisis: solo pasan respaldos completos y volcados MySQL con la estructura esperada."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -160,6 +161,23 @@ def test_admins_se_cuentan_sin_importar_mayusculas_ni_espacios(tmp_path: Path) -
     assert informe.valido, informe.errores
     assert informe.usuarios == 3
     assert informe.usuarios_admin == 2
+
+
+AVISO_CLAVE_PUBLICA = "La clave temporal inicial es la clave pública por defecto; defina una propia en backend/.env antes de importar usuarios."
+
+
+def test_advierte_clave_temporal_publica_si_hay_usuarios(tmp_path: Path, settings: Any) -> None:
+    settings.CLAVE_TEMPORAL_INICIAL = settings.CLAVE_TEMPORAL_PUBLICA
+    informe = analizar_dump(_escribir(tmp_path, volcado_mysql(ADMINS)))
+    assert informe.valido
+    assert AVISO_CLAVE_PUBLICA in informe.advertencias
+
+
+def test_no_advierte_clave_publica_sin_usuarios_o_con_clave_propia(tmp_path: Path, settings: Any) -> None:
+    settings.CLAVE_TEMPORAL_INICIAL = settings.CLAVE_TEMPORAL_PUBLICA
+    assert AVISO_CLAVE_PUBLICA not in analizar_dump(_escribir(tmp_path, volcado_mysql(DOS_CONTACTOS))).advertencias
+    settings.CLAVE_TEMPORAL_INICIAL = "Propia#2026x"
+    assert AVISO_CLAVE_PUBLICA not in analizar_dump(_escribir(tmp_path, volcado_mysql(ADMINS))).advertencias
 
 
 def test_advertencia_admins_dice_que_se_crean_inactivas(tmp_path: Path) -> None:

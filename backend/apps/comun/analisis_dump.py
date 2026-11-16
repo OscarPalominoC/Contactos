@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from django.conf import settings
+
 from apps.comun import normalizacion as n
 from apps.comun.legado import _parsear_valores
 
@@ -17,6 +19,10 @@ _PREFIJO_COLUMNA = b"  `"
 _INSERT_USUARIO = b"INSERT INTO `usuario` VALUES "
 _UNRESTRICT = rb"\unrestrict"
 _ERROR_POSTGRES = "No es un respaldo completo de Check Contactos."
+_AVISO_CLAVE_PUBLICA = (
+    "La clave temporal inicial es la clave pública por defecto; "
+    "defina una propia en backend/.env antes de importar usuarios."
+)
 _ERROR_DESCONOCIDO = (
     "Formato no reconocido: solo se aceptan respaldos de Check Contactos o volcados MySQL del sistema anterior."
 )
@@ -175,3 +181,6 @@ def _validar_mysql(informe: InformeDump, requeridas: list) -> None:  # type: ign
         informe.advertencias.append(
             f"{informe.usuarios_admin} cuentas con rol administrador se crearán inactivas; actívelas desde Usuarios."
         )
+    clave = (settings.CLAVE_TEMPORAL_INICIAL or "").strip()
+    if informe.usuarios and clave == settings.CLAVE_TEMPORAL_PUBLICA:
+        informe.advertencias.append(_AVISO_CLAVE_PUBLICA)

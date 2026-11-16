@@ -320,16 +320,12 @@ def importar_usuarios(ruta: Path) -> Resultado:
 
     Solo se leen nip (0), nombre (1) y tipo (3): la columna 2 (`clave`) nunca se toca.
     Las cuentas que ya existen no se modifican y cuentan como omitidas.
-    Las cuentas con rol administrador se crean inactivas (un administrador actual debe activarlas), y si la
-    clave temporal es la pública por defecto no se crea ninguna: cualquiera la conoce.
+    Las cuentas con rol administrador se crean inactivas (un administrador actual debe activarlas). Si la clave
+    temporal es la pública por defecto, las cuentas se crean igual y el informe pide cambiarla en backend/.env.
     """
     resultado = Resultado("usuario")
     clave_inicial = (settings.CLAVE_TEMPORAL_INICIAL or "").strip()
-    if clave_inicial == settings.CLAVE_TEMPORAL_PUBLICA:
-        clave_inicial = ""
-        motivo_sin_clave = "CLAVE_TEMPORAL_INICIAL es la clave pública por defecto: usuarios no importados"
-    else:
-        motivo_sin_clave = "CLAVE_TEMPORAL_INICIAL no configurada: usuarios no importados"
+    clave_publica = clave_inicial == settings.CLAVE_TEMPORAL_PUBLICA
     roles = {codigo for codigo, _ in ROLES}
     ImportacionRechazo.objects.filter(tabla="usuario").delete()
     existentes = set(Usuario.objects.values_list("nip", flat=True))
@@ -370,7 +366,7 @@ def importar_usuarios(ruta: Path) -> Resultado:
         if not clave_inicial:
             resultado.omitidas += 1
             if not sin_clave_avisado:
-                resultado.contar(motivo_sin_clave)
+                resultado.contar("CLAVE_TEMPORAL_INICIAL no configurada: usuarios no importados")
                 sin_clave_avisado = True
             continue
         tipo = n.texto(fila[3])
@@ -390,6 +386,8 @@ def importar_usuarios(ruta: Path) -> Resultado:
         cuenta.save()
         cuenta.sincronizar_grupo()
         resultado.insertadas += 1
+    if clave_publica and resultado.insertadas:
+        resultado.contar("CLAVE_TEMPORAL_INICIAL es la clave pública por defecto: cámbiela en backend/.env")
     ImportacionRechazo.objects.bulk_create(rechazos, batch_size=LOTE)
     return resultado
 

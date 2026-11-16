@@ -435,13 +435,20 @@ class TestImportacionUsuarios:
         assert Usuario.objects.get(nip="7").is_active
         assert "usuario: administrador legado creado inactivo (1)" in informe.read_text(encoding="utf-8")
 
-    def test_clave_publica_por_defecto_no_crea_usuarios(
-        self, dump: Path, tmp_path: Path, grupos: Any, settings: Any
+    def test_clave_publica_por_defecto_crea_usuarios_y_lo_advierte(
+        self, tmp_path: Path, grupos: Any, settings: Any
     ) -> None:
         settings.CLAVE_TEMPORAL_INICIAL = f"  {settings.CLAVE_TEMPORAL_PUBLICA} "
+        ruta = _escribir(
+            tmp_path,
+            "INSERT INTO `usuario` VALUES ('01','PRUEBA','x','administrador'),('7','OPERADOR','x','usuario');\n",
+        )
         informe = tmp_path / "i.md"
-        call_command("importar_legado", str(dump), informe=informe)
-        assert not Usuario.objects.filter(nip="100").exists()
+        call_command("importar_legado", str(ruta), informe=informe)
+        operador = Usuario.objects.get(nip="7")
+        assert operador.is_active and operador.check_password(settings.CLAVE_TEMPORAL_PUBLICA)
+        assert operador.debe_cambiar_clave
+        assert not Usuario.objects.get(nip="01").is_active
         texto = informe.read_text(encoding="utf-8")
-        assert "CLAVE_TEMPORAL_INICIAL es la clave pública por defecto: usuarios no importados" in texto
-        assert "| usuario | 1 | 0 | 0 | 0 | 1 | Sí |" in texto
+        assert "CLAVE_TEMPORAL_INICIAL es la clave pública por defecto: cámbiela en backend/.env (1)" in texto
+        assert "| usuario | 2 | 2 | 0 | 0 | 0 | Sí |" in texto
