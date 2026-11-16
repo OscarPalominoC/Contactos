@@ -18,6 +18,7 @@ from apps.cuentas.models import Ingreso, Usuario
 from apps.llamadas.models import LlamadaCumpleanos, LlamadaRtm, LlamadaSoat
 from apps.revisiones.models import Revision, Soat
 from apps.vehiculos.models import Linea, Marca, Moto
+from tests.fabricas_dump import volcado_mysql
 
 BOGOTA = ZoneInfo("America/Bogota")
 
@@ -39,7 +40,7 @@ INSERT INTO `usuario` VALUES ('100','ANA','clave-legada-que-no-se-usa','usuario'
 @pytest.fixture
 def dump(tmp_path: Path) -> Path:
     ruta = tmp_path / "legado.sql"
-    ruta.write_bytes(DUMP_SINTETICO.encode("latin-1"))
+    ruta.write_bytes(volcado_mysql(DUMP_SINTETICO).encode("latin-1"))
     return ruta
 
 
@@ -143,7 +144,7 @@ class TestComandoImportar:
         assert Ingreso.objects.count() == 2
         assert ImportacionRechazo.objects.count() == 3
         texto = informe.read_text(encoding="utf-8")
-        assert "| contacto | 2 | 2 | 0 | 0 | Sí |" in texto
+        assert "| contacto | 2 | 2 | 0 | 0 | 0 | Sí |" in texto
         assert "motos sin contacto: 1" in texto
         assert "100" not in texto.split("## Huérfanos")[0].split("|---|")[1].replace("| 100", "")
 
@@ -184,7 +185,7 @@ class TestComandoImportar:
 
     def test_columnas_incorrectas_van_a_rechazos(self, tmp_path: Path) -> None:
         ruta = tmp_path / "corto.sql"
-        ruta.write_text("INSERT INTO `marca` VALUES ('A'),('','X');\n", encoding="latin-1")
+        ruta.write_text(volcado_mysql("INSERT INTO `marca` VALUES ('A'),('','X');\n"), encoding="latin-1")
         call_command("importar_legado", str(ruta), tablas=["marca"], informe=tmp_path / "i.md")
         motivos = sorted(ImportacionRechazo.objects.values_list("motivo", flat=True))
         assert motivos == ["código vacío", "se esperaban 2 columnas y llegaron 1"]
@@ -220,7 +221,7 @@ def test_importar_aplica_saneamiento_de_fechas(tmp_path: Path) -> None:
     """En una BD nueva el entrypoint migra antes de importar: el importador debe sanear por sí mismo."""
     ruta = tmp_path / "legado.sql"
     ruta.write_bytes(
-        (
+        volcado_mysql(
             "INSERT INTO `contacto` VALUES ('31F','FEBRERO','0','300',31,'Febrero','ND','ND','OP','habilitado',NULL,0),"
             "('OK1','VALIDO','0','300',10,'Marzo','ND','ND','OP','habilitado',NULL,0);\n"
             "INSERT INTO `moto` VALUES ('MYC04D','HONDA','2017','','0','2017-07-21','2018-07-21','31F','0','','');\n"
@@ -231,3 +232,63 @@ def test_importar_aplica_saneamiento_de_fechas(tmp_path: Path) -> None:
     assert Contacto.objects.get(nip="31F").contactar_cumpleanos is False
     assert Contacto.objects.get(nip="OK1").contactar_cumpleanos is True
     assert Soat.objects.get(soat="1318-SURA").fecha_soat == date(2017, 7, 21)
+
+
+def _escribir(tmp_path: Path, inserts: str, **opciones: Any) -> Path:
+    ruta = tmp_path / "v.sql"
+    ruta.write_bytes(volcado_mysql(inserts, **opciones).encode("latin-1"))
+    return ruta
+
+
+@pytest.mark.django_db
+class TestImportacionSegura:
+    def test_fallo_a_mitad_no_modifica_datos(self, tmp_path: Path) -> None:
+        Contacto.objects.create(nip="OLD", nombre="VIEJO")
+        Moto.objects.create(placa="OLD1", contacto_id="OLD")
+        antes = ImportacionRechazo.objects.count()
+        ruta = _escribir(
+            tmp_path,
+            "INSERT INTO `marca` VALUES ('HO','HONDA');\n"
+            "INSERT INTO `contacto` VALUES ('100','ANA','0','300',15,'Febrero','ND','ND','OP','habilitado',NULL,0);\n"
+            "INSERT INTO `revision` VALUES (NULL,'C1'\n",
+        )
+        with pytest.raises(CommandError):
+            call_command("importar_legado", str(ruta), informe=tmp_path / "i.md")
+        assert Contacto.objects.filter(nip="OLD").exists()
+        assert Moto.objects.count() == 1
+        assert Marca.objects.count() == 0
+        assert ImportacionRechazo.objects.count() == antes
+
+    def test_volcado_invalido_no_borra_nada(self, tmp_path: Path) -> None:
+        Contacto.objects.create(nip="OLD", nombre="VIEJO")
+        ruta = _escribir(tmp_path, "INSERT INTO `marca` VALUES ('HO','HONDA');\n", omitir={"contacto"})
+        with pytest.raises(CommandError, match="Falta la tabla"):
+            call_command("importar_legado", str(ruta), informe=tmp_path / "i.md")
+        assert Contacto.objects.filter(nip="OLD").exists()
+
+    def test_texto_largo_se_recorta(self, tmp_path: Path) -> None:
+        larga = "X" * 600
+        ruta = _escribir(
+            tmp_path,
+            f"INSERT INTO `contacto` VALUES ('100','ANA','0','300',15,'Febrero','{larga}','ND','OP','habilitado',NULL,0);\n",  # noqa: S608
+        )
+        informe = tmp_path / "i.md"
+        call_command("importar_legado", str(ruta), tablas=["contacto"], informe=informe)
+        maximo = Contacto._meta.get_field("direccion").max_length
+        assert len(Contacto.objects.get(nip="100").direccion) == maximo
+        assert "direccion recortado a" in informe.read_text(encoding="utf-8")
+
+    def test_pk_larga_se_rechaza(self, tmp_path: Path) -> None:
+        ruta = _escribir(tmp_path, f"INSERT INTO `marca` VALUES ('{'M' * 60}','X');\n")  # noqa: S608
+        call_command("importar_legado", str(ruta), tablas=["marca"], informe=tmp_path / "i.md")
+        rechazo = ImportacionRechazo.objects.get()
+        assert "excede" in rechazo.motivo
+        assert Marca.objects.count() == 0
+
+    def test_al_avanzar_recibe_cada_tabla(self, dump: Path) -> None:
+        from apps.comun.management.commands.importar_legado import importar_dump
+
+        registro: list[tuple[str, int, int]] = []
+        importar_dump(dump, al_avanzar=lambda t, i, total: registro.append((t, i, total)))
+        assert len(registro) == 10
+        assert registro[-1] == ("entrada_sistema", 10, 10)

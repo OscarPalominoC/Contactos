@@ -1,9 +1,9 @@
-"""Importa las 11 tablas vigentes del dump legado de MySQL a PostgreSQL.
+"""Importa las 10 tablas de datos (más `usuario`) del dump legado de MySQL a PostgreSQL.
 
 Uso: python manage.py importar_legado ../CONTACTOS_recuperado_2026-11-07.sql
 
 - Lee el dump en streaming, extrae valores de los INSERT (nunca ejecuta SQL del dump).
-- Idempotente: vacía cada tabla de destino antes de cargarla, dentro de su transacción.
+- Valida el volcado antes de tocar nada y lo importa todo en una sola transacción: si falla, no cambia nada.
 - La columna legada `usuario.clave` NUNCA se lee: las cuentas se crean con `crear_cuentas_temporales`.
 - Las filas inválidas van a `comun_importacion_rechazo`; ninguna se descarta en silencio.
 """
@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 LOTE = 5000
 
 
+AlAvanzar = Callable[[str, int, int], None]
+
+
 class FilaInvalidaError(Exception):
     """La fila no se puede convertir; se registra como rechazo."""
 
@@ -43,6 +46,7 @@ class Resultado:
     insertadas: int = 0
     rechazadas: int = 0
     duplicadas: int = 0
+    omitidas: int = 0
     normalizadas: dict[str, int] = field(default_factory=dict)
 
     def contar(self, motivo: str) -> None:
@@ -227,6 +231,20 @@ TABLAS = [
 ]
 
 
+def ajustar_longitudes(instancia: models.Model, resultado: Resultado) -> None:
+    """Recorta los textos que exceden `max_length`; si es la clave primaria, la fila se rechaza."""
+    for campo in instancia._meta.fields:
+        if not isinstance(campo, models.CharField) or not campo.max_length:
+            continue
+        valor = getattr(instancia, campo.attname)
+        if not isinstance(valor, str) or len(valor) <= campo.max_length:
+            continue
+        if campo.primary_key:
+            raise FilaInvalidaError(f"{campo.name} excede {campo.max_length} caracteres")
+        setattr(instancia, campo.attname, valor[: campo.max_length])
+        resultado.contar(f"{campo.name} recortado a {campo.max_length} caracteres")
+
+
 def _lotes(iterable: Iterator[models.Model], tamano: int) -> Iterator[list[models.Model]]:
     lote: list[models.Model] = []
     for elemento in iterable:
@@ -239,7 +257,7 @@ def _lotes(iterable: Iterator[models.Model], tamano: int) -> Iterator[list[model
 
 
 def importar_tabla(ruta: Path, tabla: Tabla) -> Resultado:
-    """Carga una tabla en una transacción. Las PK repetidas en el legado se registran como rechazo."""
+    """Carga una tabla (savepoint dentro de `importar_dump`). Las PK repetidas se registran como rechazo."""
     resultado = Resultado(tabla.legada)
     vistas: set[Any] = set()
     rechazos: list[ImportacionRechazo] = []
@@ -251,6 +269,7 @@ def importar_tabla(ruta: Path, tabla: Tabla) -> Resultado:
                 if len(fila) != tabla.columnas:
                     raise FilaInvalidaError(f"se esperaban {tabla.columnas} columnas y llegaron {len(fila)}")
                 instancia = tabla.convertir(fila, resultado)
+                ajustar_longitudes(instancia, resultado)
             except FilaInvalidaError as exc:
                 rechazos.append(ImportacionRechazo(tabla=tabla.legada, fila_origen=repr(fila)[:2000], motivo=str(exc)))
                 resultado.rechazadas += 1
@@ -303,6 +322,49 @@ def huerfanos() -> dict[str, int]:
     }
 
 
+def _cuadra(r: Resultado) -> bool:
+    return r.insertadas + r.rechazadas + r.duplicadas + r.omitidas == r.origen
+
+
+def importar_dump(
+    ruta: Path,
+    *,
+    elegidas: set[str] | None = None,
+    importar_usuarios: bool = True,  # lo usa la importación de cuentas (no-op por ahora)
+    al_avanzar: AlAvanzar | None = None,
+) -> tuple[list[Resultado], dict[str, int]]:
+    """Valida el volcado y lo importa en una sola transacción. Devuelve (resultados por tabla, huérfanos)."""
+    from django.apps import apps as registro
+
+    from apps.comun.analisis_dump import analizar_dump
+    from apps.comun.saneamiento import sanear_datos_legados
+
+    informe_dump = analizar_dump(ruta)
+    if not informe_dump.valido or informe_dump.tipo != "mysql_legado":
+        raise CommandError("; ".join(informe_dump.errores) or "El archivo no es un volcado MySQL del legado.")
+    tablas = [t for t in TABLAS if elegidas is None or t.legada in elegidas]
+    resultados: list[Resultado] = []
+    try:
+        with transaction.atomic():
+            for tabla in reversed(tablas):
+                tabla.modelo._default_manager.all()._raw_delete(tabla.modelo._default_manager.db)  # type: ignore[attr-defined]
+            for indice, tabla in enumerate(tablas, start=1):
+                resultados.append(importar_tabla(ruta, tabla))
+                if al_avanzar:
+                    al_avanzar(tabla.legada, indice, len(tablas))
+            sanear_datos_legados(registro)
+            faltantes = huerfanos()
+            malas = [r.tabla for r in resultados if not _cuadra(r)]
+            if malas:
+                raise CommandError(f"Hay tablas que no cuadran ({', '.join(malas)}); no se importó nada.")
+    except CommandError:
+        raise
+    except Exception as exc:  # volcado ilegible o fallo de BD: la transacción ya se revirtió
+        logger.exception("Falló la importación del legado")
+        raise CommandError(f"No se pudo importar el volcado ({type(exc).__name__}): {exc}") from exc
+    return resultados, faltantes
+
+
 def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: float) -> str:
     """Informe en Markdown, sin datos personales."""
     ahora = timezone.localtime()
@@ -315,15 +377,16 @@ def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: fl
         "---",
         f"# Informe de importación del legado — {ahora:%Y-%m-%d %H:%M}",
         "",
-        f"Duración: {segundos:.0f} s. Regla de cuadre: insertadas + rechazadas + duplicadas = filas de origen.",
+        f"Duración: {segundos:.0f} s. Regla de cuadre: insertadas + rechazadas + duplicadas + omitidas = filas de origen.",
         "",
-        "| Tabla legada | Origen | Insertadas | Rechazadas | Duplicadas | ¿Cuadra? |",
-        "|---|---|---|---|---|---|",
+        "| Tabla legada | Origen | Insertadas | Rechazadas | Duplicadas | Omitidas | ¿Cuadra? |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in resultados:
-        cuadra = r.insertadas + r.rechazadas + r.duplicadas == r.origen
+        cuadra = _cuadra(r)
+        marca = "Sí" if cuadra else "NO"
         lineas.append(
-            f"| {r.tabla} | {r.origen} | {r.insertadas} | {r.rechazadas} | {r.duplicadas} | {'Sí' if cuadra else 'NO'} |"
+            f"| {r.tabla} | {r.origen} | {r.insertadas} | {r.rechazadas} | {r.duplicadas} | {r.omitidas} | {marca} |"
         )
     lineas += ["", "## Normalizaciones", ""]
     for r in resultados:
@@ -342,50 +405,35 @@ def informe(resultados: list[Resultado], faltantes: dict[str, int], segundos: fl
 
 
 class Command(BaseCommand):
-    help = "Importa el dump legado de MySQL (11 tablas vigentes) a PostgreSQL."
+    help = "Importa el dump legado de MySQL (10 tablas de datos y usuarios) a PostgreSQL."
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("dump", type=Path, help="Ruta al archivo .sql del legado.")
         parser.add_argument("--tablas", nargs="*", help="Importar solo estas tablas legadas.")
+        parser.add_argument("--sin-usuarios", action="store_true", help="No importar las cuentas del legado.")
         parser.add_argument("--informe", type=Path, default=None, help="Ruta del informe Markdown.")
 
     def handle(self, *args: Any, **opciones: Any) -> None:
         ruta: Path = opciones["dump"]
         if not ruta.is_file():
             raise CommandError(f"No existe el archivo {ruta}.")
-        elegidas = set(opciones["tablas"] or [t.legada for t in TABLAS])
+        elegidas = set(opciones["tablas"]) if opciones["tablas"] else None
         inicio = time.monotonic()
-        with transaction.atomic():
-            for tabla in reversed(TABLAS):
-                if tabla.legada in elegidas:
-                    tabla.modelo._default_manager.all()._raw_delete(tabla.modelo._default_manager.db)  # type: ignore[attr-defined]
-        resultados: list[Resultado] = []
-        for tabla in TABLAS:
-            if tabla.legada not in elegidas:
-                continue
-            t0 = time.monotonic()
-            resultado = importar_tabla(ruta, tabla)
-            resultados.append(resultado)
-            self.stdout.write(
-                f"{tabla.legada:26} origen={resultado.origen:>7} insertadas={resultado.insertadas:>7} "
-                f"rechazadas={resultado.rechazadas:>4} duplicadas={resultado.duplicadas:>4} "
-                f"({time.monotonic() - t0:.0f} s)"
-            )
-        from django.apps import apps as registro
 
-        from apps.comun.saneamiento import sanear_datos_legados
+        def avance(tabla: str, indice: int, total: int) -> None:
+            self.stdout.write(f"[{indice}/{total}] {tabla}")
 
-        saneado = sanear_datos_legados(registro)
-        self.stdout.write(
-            f"saneamiento: cumpleaños desactivados={saneado['cumpleanos_desactivados']} "
-            f"fechas corregidas={saneado['fechas_corregidas']}"
+        resultados, faltantes = importar_dump(
+            ruta, elegidas=elegidas, importar_usuarios=not opciones["sin_usuarios"], al_avanzar=avance
         )
-        faltantes = huerfanos()
+        for r in resultados:
+            self.stdout.write(
+                f"{r.tabla:26} origen={r.origen:>7} insertadas={r.insertadas:>7} "
+                f"rechazadas={r.rechazadas:>4} duplicadas={r.duplicadas:>4} omitidas={r.omitidas:>4}"
+            )
         destino = opciones["informe"] or Path(__file__).resolve().parents[5] / "logs" / (
             f"importacion-{timezone.localtime():%Y-%m-%d-%H%M}.md"
         )
         destino.parent.mkdir(parents=True, exist_ok=True)
         destino.write_text(informe(resultados, faltantes, time.monotonic() - inicio), encoding="utf-8")
         self.stdout.write(self.style.SUCCESS(f"Informe: {destino}"))
-        if any(r.insertadas + r.rechazadas + r.duplicadas != r.origen for r in resultados):
-            raise CommandError("Hay tablas que no cuadran; revise el informe.")
