@@ -49,6 +49,14 @@ function rutaApi(subruta: string, usarLoopback: boolean): string {
 
 type PestanaRespaldo = "generar" | "cargar";
 
+/** Texto de las etapas de la restauración que no tienen avance por tablas. */
+const TEXTO_ETAPA: Record<string, string> = {
+  analizando: "Analizando archivo…",
+  respaldo_previo: "Creando respaldo previo…",
+  importando: "Importando…",
+  finalizado: "Finalizado",
+};
+
 export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
   const queryClient = useQueryClient();
   const [pestanaActiva, setPestanaActiva] = useState<PestanaRespaldo>("generar");
@@ -397,25 +405,31 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
         {mensajeExito && <Aviso tipo="exito">{mensajeExito}</Aviso>}
       </div>
 
-      {progreso && progreso.total > 0 && (
+      {progreso && typeof progreso.total === "number" && progreso.total > 0 ? (
         <div className="mt-4">
           <p id="etiqueta-progreso" className="text-sm font-semibold">
-            {`Importando ${progreso.tabla_actual ?? progreso.etapa} (${progreso.avance}/${progreso.total})`}
+            {`Importando ${progreso.tabla_actual || progreso.etapa} (${progreso.avance ?? 0}/${progreso.total})`}
           </p>
           <div
             role="progressbar"
             aria-labelledby="etiqueta-progreso"
             aria-valuemin={0}
-            aria-valuenow={progreso.avance}
+            aria-valuenow={progreso.avance ?? 0}
             aria-valuemax={progreso.total}
             className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10"
           >
             <div
               className="h-full rounded-full bg-marca-azul transition-all"
-              style={{ width: `${Math.min(100, (progreso.avance / progreso.total) * 100)}%` }}
+              style={{ width: `${Math.min(100, ((progreso.avance ?? 0) / progreso.total) * 100)}%` }}
             />
           </div>
         </div>
+      ) : (
+        progreso && (
+          <p role="status" className="mt-4 text-sm font-semibold">
+            {TEXTO_ETAPA[progreso.etapa] ?? progreso.etapa}
+          </p>
+        )
       )}
 
       {/* CONTENIDO PESTAÑA 1: GENERAR RESPALDO */}
@@ -886,7 +900,7 @@ export function TarjetaRespaldo({ esAdmin = true }: { esAdmin?: boolean }) {
                 {`Importar ${analisis.usuarios} usuarios del archivo`}
               </label>
               <p id="ayuda-importar-usuarios" className="texto-secundario mt-1 text-xs">
-                Las cuentas nuevas usarán la clave temporal inicial del servidor y deberán cambiarla al ingresar. Las cuentas existentes no se modifican.
+                Las cuentas nuevas usarán la clave temporal inicial del servidor y deberán cambiarla al ingresar. Las de rol administrador se crean inactivas: actívelas desde Usuarios. Las cuentas existentes no se modifican.
               </p>
             </div>
           )}

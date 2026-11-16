@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TarjetaRespaldo } from "../features/tablero/TarjetaRespaldo";
+import { respaldoEstadoSchema } from "../services/esquemas";
 import * as recursos from "../services/recursos";
 
 vi.mock("../services/recursos");
@@ -147,6 +148,32 @@ describe("TarjetaRespaldo", () => {
     expect(barra).toHaveAttribute("aria-valuenow", "2");
     expect(barra).toHaveAttribute("aria-valuemax", "5");
     expect(screen.getByText("Importando contactos (2/5)")).toBeInTheDocument();
+  });
+
+  it("acepta un progreso sin avance ni total (etapas sin tablas)", () => {
+    const estado = respaldoEstadoSchema.parse({
+      ...estadoBase,
+      ejecutando: true,
+      progreso: { etapa: "respaldo_previo", tabla_actual: null, avance: null, total: null },
+    });
+    expect(estado.progreso?.total).toBeNull();
+  });
+
+  it.each([
+    ["analizando", "Analizando archivo…"],
+    ["respaldo_previo", "Creando respaldo previo…"],
+    ["importando", "Importando…"],
+    ["finalizado", "Finalizado"],
+  ])("muestra el texto de la etapa %s sin barra de progreso", async (etapa, texto) => {
+    mockServidor({
+      ...estadoBase,
+      ejecutando: true,
+      progreso: { etapa, tabla_actual: null, avance: null, total: null },
+    });
+    renderizar();
+
+    expect(await screen.findByText(texto)).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("en dispositivo remoto NO muestra ningún botón ni tarjeta en el DOM", async () => {

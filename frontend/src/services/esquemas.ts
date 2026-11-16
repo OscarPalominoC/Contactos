@@ -212,8 +212,9 @@ export type RespaldoUltimo = z.infer<typeof respaldoUltimoSchema>;
 export const progresoSchema = z.object({
   etapa: z.string(),
   tabla_actual: z.string().nullable().optional(),
-  avance: z.number(),
-  total: z.number(),
+  // Las etapas sin tablas (análisis, respaldo previo, psql, final) publican avance y total en null.
+  avance: z.number().nullable().optional(),
+  total: z.number().nullable().optional(),
 });
 export type Progreso = z.infer<typeof progresoSchema>;
 
