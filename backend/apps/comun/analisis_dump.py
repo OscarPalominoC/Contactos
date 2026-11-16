@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from apps.comun import normalizacion as n
 from apps.comun.legado import _parsear_valores
 
 TipoDump = Literal["mysql_legado", "postgres_check", "desconocido"]
@@ -14,6 +15,7 @@ _PREFIJO_INSERT = b"INSERT INTO `"
 _PREFIJO_CREATE = b"CREATE TABLE `"
 _PREFIJO_COLUMNA = b"  `"
 _INSERT_USUARIO = b"INSERT INTO `usuario` VALUES "
+_UNRESTRICT = rb"\unrestrict"
 _ERROR_POSTGRES = "No es un respaldo completo de Check Contactos."
 _ERROR_DESCONOCIDO = (
     "Formato no reconocido: solo se aceptan respaldos de Check Contactos o volcados MySQL del sistema anterior."
@@ -54,11 +56,17 @@ def _contar_usuarios(linea: bytes) -> tuple[int, int] | None:
             if len(fila) != len(COLUMNAS_USUARIO):
                 return None
             total += 1
-            if fila[3] == "administrador":
+            if n.texto(fila[3]).lower() == "administrador":  # misma normalización que importar_usuarios
                 admin += 1
     except (ValueError, IndexError):
         return None
     return total, admin
+
+
+def _es_linea_significativa(linea: bytes) -> bool:
+    r"""Descarta el adorno final de pg_dump: líneas vacías, `--` y el `\unrestrict <clave>` de pg_dump 17.6+."""
+    limpia = linea.strip()
+    return limpia not in (b"", b"--") and not limpia.startswith(_UNRESTRICT)
 
 
 def _nombre_tabla(linea: bytes) -> str | None:
@@ -85,7 +93,7 @@ def analizar_dump(ruta: Path) -> InformeDump:
         for numero, linea in enumerate(archivo):
             if numero < _LINEAS_ENCABEZADO:
                 cabecera.append(linea)
-            if linea.strip() not in (b"", b"--"):  # pg_dump cierra con un `--` de adorno
+            if _es_linea_significativa(linea):
                 ultima_linea = linea
             if en_create:
                 if linea.startswith(_PREFIJO_COLUMNA) and actual is not None:
@@ -165,5 +173,5 @@ def _validar_mysql(informe: InformeDump, requeridas: list) -> None:  # type: ign
         informe.advertencias.append(f"{sobrantes} tablas del sistema anterior no se importan.")
     if informe.usuarios_admin:
         informe.advertencias.append(
-            f"{informe.usuarios_admin} cuentas con rol administrador quedarán con la clave temporal inicial."
+            f"{informe.usuarios_admin} cuentas con rol administrador se crearán inactivas; actívelas desde Usuarios."
         )

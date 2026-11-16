@@ -126,3 +126,42 @@ def test_linea_sin_cierre_de_comilla_es_error(tmp_path: Path, linea: str) -> Non
     informe = analizar_dump(_escribir(tmp_path, volcado_mysql(linea)))
     assert not informe.valido
     assert any("malformadas" in e for e in informe.errores)
+
+
+RESTRICT = chr(92) + "restrict abc123\n"  # metacomando de psql que pg_dump 17.6+ escribe
+UNRESTRICT = chr(92) + "unrestrict abc123\n"
+
+
+def test_postgres_con_unrestrict_final_es_valido(tmp_path: Path) -> None:
+    """pg_dump 17.6+ escribe la línea UNRESTRICT después de la marca de fin."""
+    texto = volcado_postgres() + "\n" + UNRESTRICT
+    informe = analizar_dump(_escribir(tmp_path, texto))
+    assert informe.valido, informe.errores
+    assert informe.completo
+
+
+def test_postgres_con_restrict_inicial_es_valido(tmp_path: Path) -> None:
+    texto = RESTRICT + "\n" + volcado_postgres() + "\n" + UNRESTRICT
+    informe = analizar_dump(_escribir(tmp_path, texto))
+    assert informe.valido, informe.errores
+
+
+def test_postgres_truncado_con_unrestrict_sigue_invalido(tmp_path: Path) -> None:
+    texto = volcado_postgres().replace("-- PostgreSQL database dump complete\n", "") + UNRESTRICT
+    informe = analizar_dump(_escribir(tmp_path, texto))
+    assert not informe.valido
+
+
+def test_admins_se_cuentan_sin_importar_mayusculas_ni_espacios(tmp_path: Path) -> None:
+    texto = volcado_mysql(
+        "INSERT INTO `usuario` VALUES ('1','A','x',' Administrador '),('2','B','y','ADMINISTRADOR'),('3','C','z',NULL);\n"
+    )
+    informe = analizar_dump(_escribir(tmp_path, texto))
+    assert informe.valido, informe.errores
+    assert informe.usuarios == 3
+    assert informe.usuarios_admin == 2
+
+
+def test_advertencia_admins_dice_que_se_crean_inactivas(tmp_path: Path) -> None:
+    informe = analizar_dump(_escribir(tmp_path, volcado_mysql(ADMINS)))
+    assert "2 cuentas con rol administrador se crearán inactivas; actívelas desde Usuarios." in informe.advertencias
