@@ -46,8 +46,9 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
       setUsuario(yo);
       setEstado("autenticado");
       return yo;
-    } catch {
-      limpiar();
+    } catch (error) {
+      // Solo 401/403 significa sesión vencida; con red caída o 5xx se conserva el estado actual.
+      if (esSesionExpirada(error)) limpiar();
       return null;
     }
   }, [limpiar]);

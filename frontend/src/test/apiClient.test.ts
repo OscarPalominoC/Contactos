@@ -143,7 +143,10 @@ describe("cliente HTTP", () => {
     const cliente = crearCliente({ alExpirarSesion });
     cliente.defaults.adapter = adapter;
     tokenStore.set("token-viejo");
-    await expect(cliente.get("/contactos")).rejects.toBeInstanceOf(ApiError);
+    const error = (await cliente.get("/contactos").catch((e: unknown) => e)) as ApiError;
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(0);
+    expect(esSesionExpirada(error)).toBe(false);
     expect(alExpirarSesion).not.toHaveBeenCalled();
     expect(tokenStore.get()).toBe("token-viejo");
   });
@@ -155,7 +158,10 @@ describe("cliente HTTP", () => {
       const status = String(config.url) === "/auth/refresh" ? 503 : 401;
       throw new axios.AxiosError(String(status), String(status), config as never, null, { status, data: {}, config, headers: {}, statusText: "" } as never);
     };
-    await expect(cliente.get("/contactos")).rejects.toBeInstanceOf(ApiError);
+    const error = (await cliente.get("/contactos").catch((e: unknown) => e)) as ApiError;
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(503);
+    expect(esSesionExpirada(error)).toBe(false);
     expect(alExpirarSesion).not.toHaveBeenCalled();
   });
 

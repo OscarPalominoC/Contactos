@@ -139,8 +139,10 @@ export function crearCliente({ baseURL = "/api/v1", alExpirarSesion }: OpcionesC
           if (esSesionExpirada(errorRefresco)) {
             tokenStore.clear();
             alExpirarSesion?.();
+            return Promise.reject(normalizarError(error));
           }
-          return Promise.reject(normalizarError(error));
+          // Se propaga el error real del refresco (red/5xx) para que nadie lo confunda con sesión vencida.
+          return Promise.reject(normalizarError(errorRefresco));
         }
         original.headers.Authorization = `Bearer ${token}`;
         return cliente(original);

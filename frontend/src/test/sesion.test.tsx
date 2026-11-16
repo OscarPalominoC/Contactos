@@ -250,4 +250,25 @@ describe("sesión y rutas protegidas", () => {
     window.dispatchEvent(new Event("online"));
     expect(await screen.findByText("estado:autenticado")).toBeInTheDocument();
   });
+
+  it("recargar no cierra la sesión ante un error de red", async () => {
+    api.post.mockResolvedValueOnce({ data: { access: "t1", expira_en: 300 } });
+    api.get
+      .mockResolvedValueOnce({ data: YO_ADMIN })
+      .mockRejectedValueOnce(new ApiError({ type: "/problemas/red", title: "Sin conexión", status: 0, detail: "sin red" }))
+      .mockRejectedValueOnce(error401());
+    let recargarFn: () => Promise<unknown> = async () => null;
+    function Estado() {
+      const { estado, recargar } = useSesion();
+      recargarFn = recargar;
+      return <p>estado:{estado}</p>;
+    }
+    renderizarConSesion(<Estado />);
+    await screen.findByText("estado:autenticado");
+    await expect(recargarFn()).resolves.toBeNull();
+    expect(screen.getByText("estado:autenticado")).toBeInTheDocument();
+    expect(tokenStore.get()).toBe("t1");
+    await recargarFn();
+    await waitFor(() => expect(screen.getByText("estado:anonimo")).toBeInTheDocument());
+  });
 });
