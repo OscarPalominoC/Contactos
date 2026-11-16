@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+exclude = [".venv", "*/migrations/*"]
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 125
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "DTZ", "S", "RET", "SIM", "T20"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S311", "E501"]
+"apps/*/migrations/*" = ["ALL"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["mypy_django_plugin.main"]
+strict = true
+warn_return_any = true
+exclude = ["\\.venv", "migrations"]
+
+[[tool.mypy.overrides]]
+module = ["axes.*", "django_filters.*", "drf_spectacular.*", "environ.*", "csp.*"]
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "config.settings"
+
+[tool.coverage.run]
+omit = ["*/migrations/*", "*/tests/*", "config/wsgi.py", "manage.py"]

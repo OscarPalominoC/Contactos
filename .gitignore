@@ -1,0 +1,22 @@
+# Secretos y datos sensibles
+.env
+*.sql
+CREDENCIALES_TEMPORALES.md
+scripts/credenciales_temporales.json
+backend/keys/
+logs/
+
+# Entornos y dependencias
+.venv/
+node_modules/
+__pycache__/
+coverage/
+.coverage
+dist/
+.pgdata/
+.secrets/
+respaldos/
+staticfiles/
+backend/.env
+frontend/.vite/
+.superpowers/
