@@ -9,17 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from django.conf import settings
-from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from apps.comun.analisis_dump import analizar_dump
+from apps.comun.analisis_dump import InformeDump, analizar_dump
 from apps.comun.management.commands.importar_legado import escribir_informe, importar_dump
+from apps.comun.management.commands.respaldar_base_datos import generar_respaldo
 from apps.comun.servicios_respaldo import (
     buscar_psql,
     es_ruta_absoluta,
     escribir_estado_ejecucion,
-    leer_estado_ejecucion,
     obtener_ruta_respaldo,
     resolver_ruta_sistema,
 )
@@ -67,7 +66,7 @@ class Command(BaseCommand):
         if not origen_str:
             raise CommandError("Debe suministrar la ruta del archivo SQL (--origen).")
         if not es_ruta_absoluta(origen_str):
-            raise CommandError(f"La ruta '{origen_str}' debe ser absoluta (ej: F:\\Prueba\respaldo.sql).")
+            raise CommandError(f"La ruta '{origen_str}' debe ser absoluta (ej: F:\\Prueba\\respaldo.sql).")
         archivo = resolver_ruta_sistema(origen_str)
         if not archivo.exists() or not archivo.is_file():
             raise CommandError(f"El archivo de respaldo '{origen_str}' no existe o no es un archivo válido.")
@@ -87,14 +86,15 @@ class Command(BaseCommand):
 
         publicar(etapa="respaldo_previo")
         try:
-            call_command("respaldar_base_datos", destino=str(obtener_ruta_respaldo()))
+            # Sin escribir estado: la restauración sigue siendo dueña del archivo de estado (ejecutando=True), y
+            # la depuración de antiguos nunca borra el archivo que se está restaurando.
+            previo = generar_respaldo(obtener_ruta_respaldo(), conservar=archivo, escribir_estado=False)
         except Exception as exc:
             raise CommandError("No se pudo crear el respaldo previo; la base de datos no se modificó.") from exc
-        # respaldar_base_datos deja `ejecutando: False`: se reescribe para que la restauración siga activa.
-        publicar(respaldo_previo=leer_estado_ejecucion().get("archivo"), ejecutando=True)
+        publicar(respaldo_previo=previo.name)
 
         if informe_dump.tipo == "mysql_legado":
-            self._importar_legado(archivo, bool(options.get("sin_usuarios")), publicar)
+            self._importar_legado(archivo, informe_dump, bool(options.get("sin_usuarios")), publicar)
             mensaje = f"Base de datos importada y restaurada con éxito desde el dump legado: {archivo.name}"
         else:
             self._ejecutar_psql(archivo, publicar)
@@ -110,15 +110,24 @@ class Command(BaseCommand):
         )
         self.stdout.write(self.style.SUCCESS(mensaje))
 
-    def _importar_legado(self, archivo: Path, sin_usuarios: bool, publicar: Callable[..., None]) -> None:
+    def _importar_legado(
+        self, archivo: Path, analisis: InformeDump, sin_usuarios: bool, publicar: Callable[..., None]
+    ) -> None:
         inicio = time.monotonic()
         publicar(etapa="importando", tabla_actual="", avance=0, total=10)
 
         def avance(tabla: str, indice: int, total: int) -> None:
             publicar(etapa="importando", tabla_actual=tabla, avance=indice, total=total)
 
-        resultados, faltantes = importar_dump(archivo, importar_usuarios=not sin_usuarios, al_avanzar=avance)
-        informe = escribir_informe(resultados, faltantes, time.monotonic() - inicio)
+        resultados, faltantes = importar_dump(
+            archivo, importar_usuarios=not sin_usuarios, al_avanzar=avance, analisis=analisis
+        )
+        # Los datos ya se confirmaron: un fallo al escribir el informe no convierte la restauración en fallida.
+        try:
+            informe = escribir_informe(resultados, faltantes, time.monotonic() - inicio)
+        except Exception as exc:
+            logger.warning("No se pudo escribir el informe de importación (%s)", type(exc).__name__)
+            return
         self.stdout.write(f"Informe de importación: {informe}")
 
     def _ejecutar_psql(self, archivo: Path, publicar: Callable[..., None]) -> None:

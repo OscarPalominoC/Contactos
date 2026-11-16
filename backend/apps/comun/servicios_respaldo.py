@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 RUTA_DEFAULT_RESPALDOS = settings.BASE_DIR.parent / "respaldos"
 ARCHIVO_CONFIG_RESPALDO = RUTA_DEFAULT_RESPALDOS / "config_respaldo.json"
 ARCHIVO_ESTADO_RESPALDO = settings.BASE_DIR.parent / "logs" / "respaldo_estado.json"
+SEGUNDOS_SIN_SENAL = 900  # sin escrituras de estado en 15 min, la operación se da por abortada
 
 
 def es_cliente_servidor_local(request: HttpRequest) -> bool:
@@ -266,11 +267,11 @@ def leer_estado_ejecucion() -> dict[str, Any]:
         try:
             datos = json.loads(ARCHIVO_ESTADO_RESPALDO.read_text(encoding="utf-8"))
             if datos.get("ejecutando"):
-                # Si lleva más de 15 minutos en estado 'ejecutando', considerar finalizado o abortado
-                iniciado_en = datos.get("iniciado_en")
-                if iniciado_en:
-                    delta = timezone.now() - datetime.fromisoformat(iniciado_en)
-                    if delta.total_seconds() > 900:
+                # Si lleva más de 15 minutos sin publicar avance, el proceso se considera abortado.
+                ultima_senal = datos.get("actualizado_en") or datos.get("iniciado_en")
+                if ultima_senal:
+                    delta = timezone.now() - datetime.fromisoformat(ultima_senal)
+                    if delta.total_seconds() > SEGUNDOS_SIN_SENAL:
                         datos["ejecutando"] = False
                         datos["error"] = "Tiempo máximo de ejecución excedido (proceso abortado)."
                         escribir_estado_ejecucion(datos)
@@ -281,9 +282,10 @@ def leer_estado_ejecucion() -> dict[str, Any]:
 
 
 def escribir_estado_ejecucion(datos: dict[str, Any]) -> None:
-    """Actualiza el archivo de estado de ejecución."""
+    """Actualiza el archivo de estado de ejecución; cada escritura sella `actualizado_en` (señal de vida)."""
     ARCHIVO_ESTADO_RESPALDO.parent.mkdir(parents=True, exist_ok=True)
-    ARCHIVO_ESTADO_RESPALDO.write_text(json.dumps(datos, indent=2), encoding="utf-8")
+    sellado = {**datos, "actualizado_en": timezone.now().isoformat()}
+    ARCHIVO_ESTADO_RESPALDO.write_text(json.dumps(sellado, indent=2), encoding="utf-8")
 
 
 def _progreso_de_estado(estado: dict[str, Any]) -> dict[str, Any] | None:
@@ -519,21 +521,30 @@ def explorar_directorio_servidor(ruta_str: str | None = None) -> dict[str, Any]:
     }
 
 
-def analizar_respaldo_servidor(ruta_archivo_str: str) -> dict[str, Any]:
-    """Analiza (sin modificar nada) un volcado ubicado en el servidor y devuelve el informe serializable."""
+def _validar_ruta_sql(ruta_str: str) -> Path:
+    """Valida que la ruta sea absoluta y apunte a un archivo .sql existente del servidor; devuelve su Path."""
     from apps.comun.excepciones import DatosInvalidos
-    from apps.comun.management.commands.importar_legado import TABLAS
 
-    limpio = (ruta_archivo_str or "").strip()
+    limpio = (ruta_str or "").strip()
+    if not limpio:
+        raise DatosInvalidos("Debe especificar la ruta del archivo .sql a restaurar.")
     if not es_ruta_absoluta(limpio):
         raise DatosInvalidos(f"La ruta '{limpio}' debe ser absoluta (ej: F:\\Prueba\\respaldo.sql).")
     ruta = resolver_ruta_sistema(limpio)
-    if not ruta.is_file():
+    if not ruta.exists():
         raise DatosInvalidos(f"El archivo '{limpio}' no existe en el disco del servidor.")
+    if not ruta.is_file():
+        raise DatosInvalidos(f"La ruta '{limpio}' no corresponde a un archivo.")
     if not ruta.name.lower().endswith(".sql"):
-        raise DatosInvalidos("El archivo a analizar debe tener extensión .sql")
+        raise DatosInvalidos("El archivo a restaurar debe tener extensión .sql")
+    return ruta
 
-    informe = analizar_dump(ruta)
+
+def analizar_respaldo_servidor(ruta_archivo_str: str) -> dict[str, Any]:
+    """Analiza (sin modificar nada) un volcado ubicado en el servidor y devuelve el informe serializable."""
+    from apps.comun.management.commands.importar_legado import TABLAS
+
+    informe = analizar_dump(_validar_ruta_sql(ruta_archivo_str))
     return {
         "tipo": informe.tipo,
         "valido": informe.valido,
@@ -593,33 +604,7 @@ def ejecutar_restauracion_consola(ruta_archivo_str: str, importar_usuarios: bool
 
         raise Conflicto("Ya hay una operación de base de datos en ejecución en el servidor.")
 
-    limpio = (ruta_archivo_str or "").strip()
-    if not limpio:
-        from apps.comun.excepciones import DatosInvalidos
-
-        raise DatosInvalidos("Debe especificar la ruta del archivo .sql a restaurar.")
-
-    if not es_ruta_absoluta(limpio):
-        from apps.comun.excepciones import DatosInvalidos
-
-        raise DatosInvalidos(f"La ruta '{limpio}' debe ser absoluta (ej: F:\\Prueba\\respaldo.sql).")
-
-    ruta_archivo = resolver_ruta_sistema(limpio)
-    if not ruta_archivo.exists():
-        from apps.comun.excepciones import DatosInvalidos
-
-        raise DatosInvalidos(f"El archivo '{limpio}' no existe en el disco del servidor.")
-
-    if not ruta_archivo.is_file():
-        from apps.comun.excepciones import DatosInvalidos
-
-        raise DatosInvalidos(f"La ruta '{limpio}' no corresponde a un archivo.")
-
-    if not ruta_archivo.name.lower().endswith(".sql"):
-        from apps.comun.excepciones import DatosInvalidos
-
-        raise DatosInvalidos("El archivo a restaurar debe tener extensión .sql")
-
+    ruta_archivo = _validar_ruta_sql(ruta_archivo_str)
     informe = analizar_dump(ruta_archivo)
     if not informe.valido:
         from apps.comun.excepciones import DatosInvalidos

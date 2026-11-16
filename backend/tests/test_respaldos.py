@@ -583,7 +583,7 @@ def test_comando_management_restaurar_base_datos(mock_buscar_psql: MagicMock, mo
     archivo_sql = tmp_path / "respaldo.sql"
     archivo_sql.write_text(volcado_postgres(), encoding="utf-8")
 
-    with patch(RESTAURAR + ".call_command"):
+    with patch(RESTAURAR + ".generar_respaldo", return_value=Path("previo.sql")):
         call_command("restaurar_base_datos", origen=str(archivo_sql))
     assert mock_run.called
     args = mock_run.call_args[0][0]
@@ -615,7 +615,7 @@ def test_restaurar_psql_usa_transaccion_unica(_psql: MagicMock, mock_run: MagicM
     mock_run.return_value = MagicMock(returncode=0)
     archivo = tmp_path / "check.sql"
     archivo.write_text(volcado_postgres(), encoding="utf-8")
-    with patch(RESTAURAR + ".call_command"):
+    with patch(RESTAURAR + ".generar_respaldo", return_value=Path("previo.sql")):
         call_command("restaurar_base_datos", origen=str(archivo))
     args = mock_run.call_args[0][0]
     assert "--single-transaction" in args
@@ -626,7 +626,7 @@ def test_falla_respaldo_previo_no_importa(tmp_path: Path):
     archivo = tmp_path / "legado.sql"
     archivo.write_text(volcado_mysql(DUMP_SINTETICO), encoding="utf-8")
     with (
-        patch(RESTAURAR + ".call_command", side_effect=CommandError("sin pg_dump")),
+        patch(RESTAURAR + ".generar_respaldo", side_effect=CommandError("sin pg_dump")),
         patch(RESTAURAR + ".importar_dump") as mock_importar,
         pytest.raises(CommandError, match="respaldo previo"),
     ):
@@ -641,7 +641,7 @@ def test_error_en_importacion_cierra_estado(tmp_path: Path):
     archivo = tmp_path / "legado.sql"
     archivo.write_text(volcado_mysql(DUMP_SINTETICO), encoding="utf-8")
     with (
-        patch(RESTAURAR + ".call_command"),
+        patch(RESTAURAR + ".generar_respaldo", return_value=Path("previo.sql")),
         patch(RESTAURAR + ".importar_dump", side_effect=RuntimeError("x")),
         pytest.raises(RuntimeError),
     ):
@@ -664,7 +664,7 @@ def test_restaurar_legado_reporta_progreso(tmp_path: Path):
         real(datos)
 
     with (
-        patch(RESTAURAR + ".call_command"),
+        patch(RESTAURAR + ".generar_respaldo", return_value=Path("previo.sql")),
         patch(RESTAURAR + ".escribir_estado_ejecucion", side_effect=espia),
         patch(RESTAURAR + ".escribir_informe", return_value=tmp_path / "informe.md"),
     ):
@@ -784,3 +784,160 @@ def test_subir_no_sobrescribe(api_admin: ClienteApi, tmp_path: Path, monkeypatch
     assert nombres == ["a.sql", "a-1.sql"]
     assert (tmp_path / "a.sql").read_bytes() == b"uno"
     assert (tmp_path / "a-1.sql").read_bytes() == b"dos"
+
+
+# --- Ola final: respaldo previo anidado, estado, mensajes y análisis único ------------------
+
+
+RESPALDAR = "apps.comun.management.commands.respaldar_base_datos"
+
+
+def _sql_con_antiguedad(carpeta: Path, nombre: str, horas: int) -> Path:
+    import os
+    import time
+
+    archivo = carpeta / nombre
+    archivo.write_text("-- x", encoding="utf-8")
+    momento = time.time() - horas * 3600
+    os.utime(archivo, (momento, momento))
+    return archivo
+
+
+@patch(RESPALDAR + ".subprocess.run", return_value=MagicMock(returncode=0))
+@patch(RESPALDAR + ".buscar_pg_dump", return_value="pg_dump.exe")
+def test_depuracion_no_borra_el_archivo_a_conservar(_pg: MagicMock, _run: MagicMock, tmp_path: Path):
+    from apps.comun.management.commands.respaldar_base_datos import generar_respaldo
+
+    origen = _sql_con_antiguedad(tmp_path, "origen.sql", 100)  # el más antiguo
+    otros = [_sql_con_antiguedad(tmp_path, f"r{i:02d}.sql", i) for i in range(1, 16)]
+    generar_respaldo(tmp_path, conservar=origen, escribir_estado=False)
+    assert origen.exists()
+    assert not otros[-1].exists()  # el más antiguo de los demás sí se depura
+    assert len([o for o in otros if o.exists()]) == 14
+
+
+@patch(RESPALDAR + ".subprocess.run", return_value=MagicMock(returncode=0))
+@patch(RESPALDAR + ".buscar_pg_dump", return_value="pg_dump.exe")
+def test_generar_respaldo_sin_estado_no_toca_el_archivo_de_estado(_pg: MagicMock, _run: MagicMock, tmp_path: Path):
+    from apps.comun.management.commands.respaldar_base_datos import generar_respaldo
+
+    archivo = generar_respaldo(tmp_path, escribir_estado=False)
+    assert archivo.parent == tmp_path and archivo.suffix == ".sql"
+    assert not ARCHIVO_ESTADO_RESPALDO.exists()
+
+
+def test_restaurar_mantiene_ejecutando_hasta_el_final(tmp_path: Path):
+    archivo = tmp_path / "legado.sql"
+    archivo.write_bytes(volcado_mysql(DUMP_SINTETICO).encode("latin-1"))
+    escritos: list[dict] = []
+    real = __import__("apps.comun.servicios_respaldo", fromlist=["x"]).escribir_estado_ejecucion
+
+    def espia(datos: dict) -> None:
+        escritos.append(dict(datos))
+        real(datos)
+
+    with (
+        patch(RESTAURAR + ".generar_respaldo", return_value=tmp_path / "check_contactos-16-11-2026.sql") as previo,
+        patch(RESTAURAR + ".escribir_estado_ejecucion", side_effect=espia),
+        patch(RESTAURAR + ".escribir_informe", return_value=tmp_path / "informe.md"),
+    ):
+        call_command("restaurar_base_datos", origen=str(archivo), sin_usuarios=True)
+    assert previo.call_args.kwargs == {"conservar": archivo, "escribir_estado": False}
+    assert [e["ejecutando"] for e in escritos[:-1]] == [True] * (len(escritos) - 1)
+    assert escritos[-1]["ejecutando"] is False
+    assert any(e.get("etapa") == "respaldo_previo" for e in escritos)
+    assert _estado()["respaldo_previo"] == "check_contactos-16-11-2026.sql"
+
+
+def test_restaurar_pasa_el_analisis_a_importar(tmp_path: Path):
+    archivo = tmp_path / "legado.sql"
+    archivo.write_bytes(volcado_mysql(DUMP_SINTETICO).encode("latin-1"))
+    with (
+        patch(RESTAURAR + ".generar_respaldo", return_value=tmp_path / "previo.sql"),
+        patch(RESTAURAR + ".importar_dump", return_value=([], {})) as importar,
+        patch(RESTAURAR + ".escribir_informe", return_value=tmp_path / "informe.md"),
+    ):
+        call_command("restaurar_base_datos", origen=str(archivo))
+    analisis = importar.call_args.kwargs["analisis"]
+    assert analisis.tipo == "mysql_legado" and analisis.valido
+
+
+def test_fallo_al_escribir_informe_no_cambia_el_exito(tmp_path: Path):
+    archivo = tmp_path / "legado.sql"
+    archivo.write_bytes(volcado_mysql(DUMP_SINTETICO).encode("latin-1"))
+    with (
+        patch(RESTAURAR + ".generar_respaldo", return_value=tmp_path / "previo.sql"),
+        patch(RESTAURAR + ".importar_dump", return_value=([], {})),
+        patch(RESTAURAR + ".escribir_informe", side_effect=OSError("disco lleno")),
+    ):
+        call_command("restaurar_base_datos", origen=str(archivo))
+    estado = _estado()
+    assert estado["exitoso"] is True and estado["ejecutando"] is False
+
+
+def test_mensaje_ruta_relativa_sin_retorno_de_carro():
+    with pytest.raises(CommandError) as error:
+        call_command("restaurar_base_datos", origen="respaldo.sql")
+    assert "\r" not in str(error.value)
+    assert "respaldo.sql" in str(error.value)
+
+
+def _escribir_estado_crudo(datos: dict) -> None:
+    ARCHIVO_ESTADO_RESPALDO.parent.mkdir(parents=True, exist_ok=True)
+    ARCHIVO_ESTADO_RESPALDO.write_text(json.dumps(datos), encoding="utf-8")
+
+
+def test_estado_con_actualizacion_reciente_sigue_ejecutando():
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.comun.servicios_respaldo import leer_estado_ejecucion
+
+    ahora = timezone.now()
+    _escribir_estado_crudo(
+        {
+            "ejecutando": True,
+            "iniciado_en": (ahora - timedelta(minutes=20)).isoformat(),
+            "actualizado_en": (ahora - timedelta(minutes=1)).isoformat(),
+        }
+    )
+    assert leer_estado_ejecucion()["ejecutando"] is True
+
+
+def test_estado_sin_actualizacion_reciente_se_aborta():
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.comun.servicios_respaldo import leer_estado_ejecucion
+
+    ahora = timezone.now()
+    _escribir_estado_crudo(
+        {
+            "ejecutando": True,
+            "iniciado_en": (ahora - timedelta(minutes=40)).isoformat(),
+            "actualizado_en": (ahora - timedelta(minutes=16)).isoformat(),
+        }
+    )
+    estado = leer_estado_ejecucion()
+    assert estado["ejecutando"] is False
+    assert "abortado" in estado["error"]
+
+
+def test_escribir_estado_registra_actualizado_en():
+    from apps.comun.servicios_respaldo import escribir_estado_ejecucion
+
+    escribir_estado_ejecucion({"ejecutando": True})
+    assert "actualizado_en" in _estado()
+
+
+def test_analizar_y_restaurar_validan_la_ruta_igual(api_admin: ClienteApi, tmp_path: Path):
+    archivo = tmp_path / "notas.txt"
+    archivo.write_text("x", encoding="utf-8")
+    mensajes = []
+    for url, clave in ((ANALIZAR_URL, "k-ruta-1"), (RESTAURAR_URL, "k-ruta-2")):
+        resp = api_admin.post(url, {"ruta_archivo": str(archivo)}, REMOTE_ADDR="127.0.0.1", HTTP_IDEMPOTENCY_KEY=clave)
+        assert resp.status_code == 422
+        mensajes.append(resp.json()["detail"])
+    assert mensajes[0] == mensajes[1] == "El archivo a restaurar debe tener extensión .sql"
