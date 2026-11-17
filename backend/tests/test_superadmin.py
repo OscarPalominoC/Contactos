@@ -39,3 +39,4 @@ def test_crear_superadmin_sin_password_omite():
         call_command("crear_superadmin", nip="admin@admin.com", stdout=out)
         assert not Usuario.objects.filter(nip="admin@admin.com").exists()
         assert "SUPERADMIN_PASSWORD no está definida" in out.getvalue()
+

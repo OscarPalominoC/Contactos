@@ -52,3 +52,4 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(f"Superadministrador {usuario.nip} ({usuario.nombre}) {accion} exitosamente.")
         )
+
