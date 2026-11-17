@@ -6,6 +6,7 @@ CREDENCIALES_TEMPORALES.md
 scripts/credenciales_temporales.json
 backend/keys/
 logs/
+*.sql
 
 # Entornos y dependencias
 .venv/
