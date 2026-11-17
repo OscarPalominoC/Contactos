@@ -34,8 +34,8 @@ services:
     environment:
       # Valores de respaldo o sobrescritura para Docker/Nginx
       DATABASE_URL: postgres://check_app:${DB_PASSWORD:-anWYoYdg2YBGup3g9L-ykdqozKCKaJ19}@db:5432/check_contactos
-      ALLOWED_HOSTS: localhost,127.0.0.1,oscarpalomino.dev,www.oscarpalomino.dev,backend
-      CORS_ALLOWED_ORIGINS: http://localhost:5177,https://oscarpalomino.dev,https://www.oscarpalomino.dev
+      ALLOWED_HOSTS: localhost,127.0.0.1,oscarpalomino.dev,www.oscarpalomino.dev,72.61.0.102,backend
+      CORS_ALLOWED_ORIGINS: http://localhost:5177,http://72.61.0.102:5177,https://oscarpalomino.dev,https://www.oscarpalomino.dev
       ADMIN_URL: ${ADMIN_URL:-gestion-c2447da1/}
       CARGAR_BASE_DATOS: ${CARGAR_BASE_DATOS:-true}
       DUMP_SQL_PATH: /data/CONTACTOS_recuperado_2026-11-07.sql
