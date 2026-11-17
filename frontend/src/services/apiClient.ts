@@ -100,7 +100,13 @@ export interface OpcionesCliente {
  * withCredentials + XSRF, Authorization desde tokenStore, X-Request-ID e Idempotency-Key,
  * refresco silencioso compartido (single-flight), cancelación sin error y errores RFC 7807.
  */
-const rutaBaseDefecto = ((import.meta.env?.BASE_URL ?? "/").replace(/\/$/, "")) + "/api/v1";
+export function resolverBaseUrl(baseEnv?: string, apiEnv?: string): string {
+  if (apiEnv) return apiEnv;
+  const baseRuta = (baseEnv ?? "/").replace(/\/$/, "");
+  return baseRuta ? `${baseRuta}/api/v1` : "/api/v1";
+}
+
+const rutaBaseDefecto = resolverBaseUrl(import.meta.env?.BASE_URL, import.meta.env?.VITE_API_URL);
 
 export function crearCliente({ baseURL = rutaBaseDefecto, alExpirarSesion }: OpcionesCliente = {}): AxiosInstance {
   const cliente = axios.create({

@@ -1,7 +1,7 @@
 import axios, { type InternalAxiosRequestConfig } from "axios";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, crearCliente, esCancelacion, esSesionExpirada, normalizarError, nuevoId, refrescarSesion } from "../services/apiClient";
+import { ApiError, crearCliente, esCancelacion, esSesionExpirada, normalizarError, nuevoId, refrescarSesion, resolverBaseUrl } from "../services/apiClient";
 import { tokenStore } from "../services/tokenStore";
 
 interface Llamada {
@@ -331,5 +331,29 @@ describe("nuevoId", () => {
         configurable: true,
       });
     }
+  });
+
+  describe("resolverBaseUrl", () => {
+    it("devuelve /api/v1 cuando no se pasa baseEnv ni apiEnv", () => {
+      expect(resolverBaseUrl()).toBe("/api/v1");
+      expect(resolverBaseUrl("/")).toBe("/api/v1");
+    });
+
+    it("resuelve subrutas como /contactos/ hacia /contactos/api/v1", () => {
+      expect(resolverBaseUrl("/contactos/")).toBe("/contactos/api/v1");
+      expect(resolverBaseUrl("/contactos")).toBe("/contactos/api/v1");
+    });
+
+    it("prioriza apiEnv cuando está definido", () => {
+      expect(resolverBaseUrl("/contactos/", "https://api.oscarpalomino.dev/v1")).toBe(
+        "https://api.oscarpalomino.dev/v1",
+      );
+    });
+
+    it("asigna la ruta base resuelta por defecto en crearCliente", () => {
+      const cliente = crearCliente();
+      expect(cliente.defaults.baseURL).toBeDefined();
+      expect(cliente.defaults.baseURL).toMatch(/\/api\/v1$/);
+    });
   });
 });
