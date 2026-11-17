@@ -1,6 +1,7 @@
 # Secretos y datos sensibles
 .env
-*.sql
+# Volcados con datos personales y claves legadas en texto plano
+/CONTACTOS*.sql
 CREDENCIALES_TEMPORALES.md
 scripts/credenciales_temporales.json
 backend/keys/
