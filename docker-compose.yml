@@ -35,11 +35,14 @@ services:
       # Valores de respaldo o sobrescritura para Docker/Nginx
       DATABASE_URL: postgres://check_app:${DB_PASSWORD:-anWYoYdg2YBGup3g9L-ykdqozKCKaJ19}@db:5432/check_contactos
       ALLOWED_HOSTS: localhost,127.0.0.1,oscarpalomino.dev,www.oscarpalomino.dev,72.61.0.102,backend
-      CORS_ALLOWED_ORIGINS: http://localhost:5177,http://72.61.0.102:5177,https://oscarpalomino.dev,https://www.oscarpalomino.dev
+      CORS_ALLOWED_ORIGINS: http://localhost:5177,http://72.61.0.102:5177,https://oscarpalomino.dev,https://www.oscarpalomino.dev,http://frontend:5173,http://frontend:5177,http://frontend,http://check_frontend:5173,http://check_frontend:5177,http://check_frontend
       ADMIN_URL: ${ADMIN_URL:-gestion-c2447da1/}
       CARGAR_BASE_DATOS: ${CARGAR_BASE_DATOS:-false}
       DUMP_SQL_PATH: /data/CONTACTOS_recuperado_2026-11-07.sql
       CLAVE_TEMPORAL_INICIAL: ${CLAVE_TEMPORAL_INICIAL:-CheckLTDA!}
+      SUPERADMIN_NIP: ${SUPERADMIN_NIP:-admin@admin.com}
+      SUPERADMIN_NOMBRE: ${SUPERADMIN_NOMBRE:-Super Administrador}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-qhjYJ8nYK9nw*fU6UTrR}
     volumes:
       - ./CONTACTOS_recuperado_2026-11-07.sql:/data/CONTACTOS_recuperado_2026-11-07.sql:ro
       - ./CREDENCIALES_TEMPORALES.md:/app/CREDENCIALES_TEMPORALES.md

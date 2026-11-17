@@ -26,6 +26,11 @@ ADMIN_URL: str = env.str("ADMIN_URL")
 if ADMIN_URL.strip("/") == "admin":
     raise environ.ImproperlyConfigured("ADMIN_URL no puede ser la ruta predeterminada /admin/.")
 
+# Superadministrador inicial configurable por variables de entorno
+SUPERADMIN_NIP: str = env.str("SUPERADMIN_NIP", default="admin@admin.com")
+SUPERADMIN_NOMBRE: str = env.str("SUPERADMIN_NOMBRE", default="Super Administrador")
+SUPERADMIN_PASSWORD: str | None = env.str("SUPERADMIN_PASSWORD", default=None)
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -195,6 +200,18 @@ REFRESH_COOKIE_SECURE = ENVIRONMENT != "local"
 
 # --- CORS, CSRF y cabeceras (skill backend §3.6) ---
 CORS_ALLOWED_ORIGINS: list[str] = env.list("CORS_ALLOWED_ORIGINS")
+ORIGENES_FRONTEND_CONTENEDOR = [
+    "http://frontend:5173",
+    "http://frontend:5177",
+    "http://frontend",
+    "http://check_frontend:5173",
+    "http://check_frontend:5177",
+    "http://check_frontend",
+]
+for origen in ORIGENES_FRONTEND_CONTENEDOR:
+    if origen not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(origen)
+
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$",
 ]
@@ -204,14 +221,18 @@ CORS_ALLOW_HEADERS = ["authorization", "content-type", "x-xsrf-token", "x-reques
 CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
 CSRF_TRUSTED_ORIGINS = list(
     set(
-        CORS_ALLOWED_ORIGINS
+        [o.rstrip("/") for o in CORS_ALLOWED_ORIGINS]
         + [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             "http://localhost:5174",
             "http://127.0.0.1:5174",
+            "http://localhost:5177",
+            "http://127.0.0.1:5177",
             "http://192.168.1.50:5174",
-            "http://72.61.0.102:5177/",
+            "http://72.61.0.102:5177",
+            "https://oscarpalomino.dev",
+            "https://www.oscarpalomino.dev",
         ]
     )
 )

@@ -62,6 +62,12 @@ EOF
 echo "==> Aplicando migraciones de base de datos..."
 python manage.py migrate --noinput
 
+# 3.1. Asegurar cuenta de superadministrador si SUPERADMIN_PASSWORD está definida
+if [ -n "$SUPERADMIN_PASSWORD" ]; then
+    echo "==> Asegurando cuenta superadministrador (${SUPERADMIN_NIP:-admin@admin.com})..."
+    python manage.py crear_superadmin
+fi
+
 # 4. Recopilar archivos estáticos
 echo "==> Recopilando archivos estáticos..."
 python manage.py collectstatic --noinput

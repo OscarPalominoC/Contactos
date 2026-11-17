@@ -9,6 +9,8 @@ from apps.comun.vistas import vista_salud
 def test_vps_ip_en_allowed_hosts_y_cors():
     assert "72.61.0.102" in settings.ALLOWED_HOSTS
     assert any("72.61.0.102" in origin for origin in settings.CORS_ALLOWED_ORIGINS)
+    assert any("frontend" in origin for origin in settings.CORS_ALLOWED_ORIGINS)
+    assert "admin@admin.com" == settings.SUPERADMIN_NIP
 
 @pytest.mark.unit
 def test_vista_salud_responde_ok():
