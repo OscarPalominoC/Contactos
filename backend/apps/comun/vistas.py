@@ -16,6 +16,18 @@ from rest_framework.serializers import BaseSerializer
 from apps.comun.excepciones import Conflicto, DatosInvalidos
 from apps.comun.middleware import request_id_actual
 from apps.comun.models import ClaveIdempotencia, RegistroAuditoria
+from django.db import connection
+from django.http import HttpRequest, JsonResponse
+
+
+def vista_salud(request: HttpRequest) -> JsonResponse:
+    """Comprobación de salud para Docker / balanceador."""
+    try:
+        connection.ensure_connection()
+        return JsonResponse({"estado": "ok", "bd": "conectada"}, status=200)
+    except Exception as e:
+        return JsonResponse({"estado": "error", "detalle": str(e)}, status=503)
+
 
 METODOS_IDEMPOTENTES = {"POST", "PUT", "PATCH"}
 VIGENCIA_IDEMPOTENCIA = timedelta(hours=24)
