@@ -6,3 +6,4 @@ import pytest
 def test_vps_ip_en_allowed_hosts_y_cors():
     assert "72.61.0.102" in settings.ALLOWED_HOSTS
     assert any("72.61.0.102" in origin for origin in settings.CORS_ALLOWED_ORIGINS)
+
