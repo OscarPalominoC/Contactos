@@ -4,13 +4,22 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  base: "/contactos/", // Crucial para que los assets carguen bajo oscarpalomino.dev/contactos/
   plugins: [react(), tailwindcss()],
   server: {
-    port: 5173,
+    host: "0.0.0.0", // Permite recibir tráfico desde fuera del contenedor
+    port: 5177,      // Coincide con el puerto mapeado en Docker
     strictPort: true,
     proxy: {
-      "/api": { target: "http://localhost:8000", changeOrigin: false },
+      "/api": { target: "http://backend:8004", changeOrigin: false }, // En docker se usa el nombre del servicio
     },
+    allowedHosts: ['oscarpalomino.dev', 'www.oscarpalomino.dev'],
+    hmr: {
+      host: 'oscarpalomino.dev',
+      clientPort: 443,
+      protocol: 'wss',
+      path: 'contactos/@vite/'
+    }
   },
   build: {
     sourcemap: false,
