@@ -195,7 +195,9 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 REFRESH_COOKIE_NAME = "refresh_token"
-REFRESH_COOKIE_PATH = "/api/v1/auth"
+# Bajo un subpath (p. ej. oscarpalomino.dev/contactos/) debe coincidir con la ruta que ve el navegador:
+# REFRESH_COOKIE_PATH=/contactos/api/v1/auth
+REFRESH_COOKIE_PATH: str = env.str("REFRESH_COOKIE_PATH", default="/api/v1/auth")
 REFRESH_COOKIE_SECURE = ENVIRONMENT != "local"
 
 # --- CORS, CSRF y cabeceras (skill backend §3.6) ---
@@ -246,6 +248,9 @@ SESSION_COOKIE_AGE = SESION_DIAS * 24 * 3600
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"
+# Detrás de nginx con TLS: el proxy indica el esquema original. Sin esto, SECURE_SSL_REDIRECT
+# ve HTTP en cada petición y responde 301 en bucle hacia una ruta sin el subpath.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 if ENVIRONMENT != "local":
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000

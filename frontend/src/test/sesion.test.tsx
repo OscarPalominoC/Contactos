@@ -251,6 +251,30 @@ describe("sesión y rutas protegidas", () => {
     expect(await screen.findByText("estado:autenticado")).toBeInTheDocument();
   });
 
+  it("si el servidor no responde muestra que no se pudo conectar y permite reintentar", async () => {
+    const red = new ApiError({ type: "/problemas/red", title: "Sin conexión", status: 0, detail: "sin red" });
+    api.post.mockRejectedValueOnce(red).mockResolvedValueOnce({ data: { access: "t1", expira_en: 300 } });
+    api.get.mockResolvedValueOnce({ data: YO_ADMIN });
+    renderizarConSesion(<Rutas />, { ruta: "/" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo conectar con el servidor");
+    await userEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+    expect(await screen.findByText("Inicio protegido")).toBeInTheDocument();
+    expect(screen.queryByText(/No se pudo conectar con el servidor/)).not.toBeInTheDocument();
+  });
+
+  it("si la API responde algo inesperado (404 o HTML) también avisa del fallo de conexión", async () => {
+    const noEncontrado = new ApiError({ type: "/problemas/404", title: "Error", status: 404, detail: "no encontrado" });
+    api.post.mockRejectedValueOnce(noEncontrado);
+    renderizarConSesion(<Rutas />, { ruta: "/" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo conectar con el servidor");
+
+    api.post.mockResolvedValueOnce({ data: "<!doctype html><html></html>" });
+    api.get.mockResolvedValueOnce({ data: "<!doctype html><html></html>" });
+    await userEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo conectar con el servidor");
+  });
+
   it("recargar no cierra la sesión ante un error de red", async () => {
     api.post.mockResolvedValueOnce({ data: { access: "t1", expira_en: 300 } });
     api.get

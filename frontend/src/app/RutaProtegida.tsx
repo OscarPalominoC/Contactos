@@ -1,10 +1,26 @@
-import { Loader2 } from "lucide-react";
+import { Loader2, RefreshCw, WifiOff } from "lucide-react";
 import type { ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
+import { Boton } from "../components/ui/Boton";
 import { useSesion } from "./sesion";
 
 function Cargando() {
+  const { sinConexion, reintentarConexion } = useSesion();
+  if (sinConexion) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-4 text-center">
+        <div role="alert" className="flex flex-col items-center gap-2">
+          <WifiOff aria-hidden="true" />
+          <p className="font-semibold">No se pudo conectar con el servidor.</p>
+          <p className="text-sm opacity-80">Se seguirá intentando automáticamente cada pocos segundos.</p>
+        </div>
+        <Boton icono={<RefreshCw aria-hidden="true" size={18} />} onClick={reintentarConexion}>
+          Reintentar
+        </Boton>
+      </div>
+    );
+  }
   return (
     <div role="status" className="flex min-h-screen items-center justify-center gap-2">
       <Loader2 aria-hidden="true" className="giro" /> Verificando sesión…

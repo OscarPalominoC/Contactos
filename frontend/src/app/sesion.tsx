@@ -13,6 +13,10 @@ export type EstadoSesion = "cargando" | "anonimo" | "autenticado";
 interface ValorSesion {
   estado: EstadoSesion;
   usuario: Yo | null;
+  /** True si el último intento de recuperar la sesión falló por red, 5xx o una respuesta inesperada. */
+  sinConexion: boolean;
+  /** Reintenta de inmediato recuperar la sesión (además de los reintentos automáticos). */
+  reintentarConexion: () => void;
   iniciar: (nip: string, password: string) => Promise<Yo>;
   cerrar: () => Promise<void>;
   cambiarClave: (actual: string, nueva: string) => Promise<Yo>;
@@ -32,6 +36,8 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
   const [usuario, setUsuario] = useState<Yo | null>(null);
   const queryClient = useQueryClient();
   const ultimaRenovacion = useRef(0);
+  const [sinConexion, setSinConexion] = useState(false);
+  const intentarArranque = useRef<() => Promise<void>>(async () => undefined);
 
   const limpiar = useCallback(() => {
     tokenStore.clear();
@@ -79,13 +85,19 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
         if (!activo) return;
         resuelto = true;
         detener();
+        setSinConexion(false);
         setUsuario(yo);
         setEstado("autenticado");
       } catch (error) {
-        if (activo && esSesionExpirada(error)) {
+        if (!activo) return;
+        if (esSesionExpirada(error)) {
           resuelto = true;
           detener();
+          setSinConexion(false);
           limpiar();
+        } else {
+          // Red caída, 5xx, 404 o una respuesta que no es la esperada (p. ej. HTML de un proxy mal configurado).
+          setSinConexion(true);
         }
       } finally {
         enCurso = false;
@@ -95,6 +107,7 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
       if (document.visibilityState === "visible") void intentar();
     }
 
+    intentarArranque.current = intentar;
     void intentar();
     window.addEventListener("focus", intentar);
     window.addEventListener("online", intentar);
@@ -166,11 +179,13 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
     return yo;
   }, []);
 
+  const reintentarConexion = useCallback(() => void intentarArranque.current(), []);
+
   const puede = useCallback((permiso: string) => usuario?.permisos.includes(permiso) ?? false, [usuario]);
 
   const valor = useMemo(
-    () => ({ estado, usuario, iniciar, cerrar, cambiarClave, recargar, puede }),
-    [estado, usuario, iniciar, cerrar, cambiarClave, recargar, puede],
+    () => ({ estado, usuario, sinConexion, reintentarConexion, iniciar, cerrar, cambiarClave, recargar, puede }),
+    [estado, usuario, sinConexion, reintentarConexion, iniciar, cerrar, cambiarClave, recargar, puede],
   );
   return <ContextoSesion.Provider value={valor}>{children}</ContextoSesion.Provider>;
 }
