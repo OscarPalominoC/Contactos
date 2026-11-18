@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { z } from "zod";
 
+import { rutaPublica } from "../../app/base";
 import { useSesion } from "../../app/sesion";
 import { AvisoError } from "../../components/ui/Aviso";
 import { Boton } from "../../components/ui/Boton";
@@ -55,7 +56,7 @@ export function PaginaLogin() {
   return (
     <div className="glass-card w-full max-w-md p-6 lg:p-8">
       <div className="mb-6 flex items-center gap-3">
-        <img src="/favicon.svg" alt="" width={48} height={48} />
+        <img src={rutaPublica("favicon.svg")} alt="" width={48} height={48} />
         <div>
           <h1 className="text-2xl uppercase">Check Contactos</h1>
           <p className="texto-secundario text-sm">CDA Check Motos</p>

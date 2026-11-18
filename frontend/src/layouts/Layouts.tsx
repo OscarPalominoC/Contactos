@@ -2,6 +2,7 @@ import { LogOut, Menu, Moon, Sun, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { rutaPublica } from "../app/base";
 import { useSesion } from "../app/sesion";
 import { useUi } from "../app/uiStore";
 import { Aviso } from "../components/ui/Aviso";
@@ -114,7 +115,7 @@ export function AppLayout() {
       <header className="glass-navbar sticky top-0 z-30 w-full">
         <div className="mx-auto flex h-16 max-w-7xl items-center gap-2 px-3 sm:gap-4 sm:px-6 lg:px-8">
           <div className="flex shrink-0 items-center gap-2.5">
-            <img src="/logo-check.png" alt="" width={36} height={36} className="h-9 w-9 object-contain" />
+            <img src={rutaPublica("logo-check.png")} alt="" width={36} height={36} className="h-9 w-9 object-contain" />
             {/* En móvil solo se ve el logo; el nombre sigue disponible para lectores de pantalla */}
             <span className="marca-texto font-heading text-lg font-extrabold tracking-wide text-marca-rojo">CHECK MOTOS</span>
           </div>

@@ -17,6 +17,7 @@ import { PaginaUsuarios } from "../features/usuarios/PaginaUsuarios";
 import { AppLayout, AuthLayout } from "../layouts/Layouts";
 import type { ApiError } from "../services/apiClient";
 import { RutaCambioClave, RutaProtegida } from "./RutaProtegida";
+import { basenameRouter } from "./base";
 import { ProveedorSesion } from "./sesion";
 
 export function crearQueryClient(): QueryClient {
@@ -82,7 +83,7 @@ const hijas: RouteObject[] = [
 
 export const rutas: RouteObject[] = [{ element: <Raiz />, children: hijas }];
 
-const router = createBrowserRouter(rutas);
+const router = createBrowserRouter(rutas, { basename: basenameRouter() });
 
 export function App({ queryClient = crearQueryClient() }: { queryClient?: QueryClient }) {
   return (
